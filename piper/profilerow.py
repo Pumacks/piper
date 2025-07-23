@@ -50,6 +50,29 @@ class ProfileRow(Gtk.ListBoxRow):
             # TODO: display this in the app
             print("Trying to disable the active profile", file=sys.stderr)
 
+    @Gtk.Template.Callback("_on_rename_button_clicked")
+    def _on_rename_button_clicked(self, button: Gtk.Button) -> None:
+        dialog = Gtk.Dialog(
+     		title="rename Profile",
+       		transient_for=self.get_toplevel(),
+         	flags=0)
+        dialog.add_buttons(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
+                           Gtk.STOCK_OK, Gtk.ResponseType.OK)
+
+        entry = Gtk.Entry()
+        entry.set_text(self.title.get_text())
+
+        box = dialog.get_content_area()
+        box.add(entry)
+        dialog.show_all()
+
+        response = dialog.run()
+        if response == Gtk.ResponseType.OK:
+            new_name = entry.get_text()
+            self.title.set_text(new_name)
+        dialog.destroy()
+
+
     def set_active(self) -> None:
         """Activates the profile paired with this row."""
         self._profile.set_active()
