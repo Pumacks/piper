@@ -3,6 +3,9 @@
 import sys
 from typing import Optional
 
+import json
+from pathlib import Path
+
 import gi
 
 from piper.ratbagd import RatbagdProfile
@@ -10,7 +13,7 @@ from piper.ratbagd import RatbagdProfile
 from .util.gobject import connect_signal_with_weak_ref
 
 gi.require_version("Gtk", "3.0")
-from gi.repository import GObject, Gtk  # noqa
+from gi.repository import GLib, GObject, Gtk  # noqa
 
 
 @Gtk.Template(resource_path="/org/freedesktop/Piper/ui/ProfileRow.ui")
@@ -22,14 +25,15 @@ class ProfileRow(Gtk.ListBoxRow):
 
     title: Gtk.Label = Gtk.Template.Child()  # type: ignore
 
-    def __init__(self, profile: RatbagdProfile, *args, **kwargs) -> None:
-        Gtk.ListBoxRow.__init__(self, *args, **kwargs)
+    def __init__(self, device: RatbagdDevice, profile: RatbagdProfile, *args, **kwargs) -> None:
+        Gtk.ListBoxRow.__init__(self)
+        self._device = device
         self._profile = profile
         connect_signal_with_weak_ref(
             self, self._profile, "notify::disabled", self._on_profile_notify_disabled
         )
 
-        name = profile.name
+        name = self._load_profile_alias() or profile.name
         if not name:
             name = f"Profile {profile.index}"
 
@@ -68,8 +72,12 @@ class ProfileRow(Gtk.ListBoxRow):
 
         response = dialog.run()
         if response == Gtk.ResponseType.OK:
-            new_name = entry.get_text()
-            self.title.set_text(new_name)
+            new_name = entry.get_text().strip()
+            if new_name:
+                self._save_profile_alias(new_name)
+                self.title.set_text(new_name)
+                self.notify("name")
+
         dialog.destroy()
 
 
@@ -84,3 +92,41 @@ class ProfileRow(Gtk.ListBoxRow):
     @GObject.Property
     def profile(self) -> RatbagdProfile:
         return self._profile
+
+    def _profile_aliases_path(self) -> Path:
+        return Path(GLib.get_user_config_dir()) / "piper" / "profile_names.json"
+
+    def _profile_alias_key(self) -> str:
+        device_name = getattr(self._device, "name", "unknown-device")
+        return f"{device_name}:{self._profile.index}"
+
+    def _load_profile_aliases(self) -> dict:
+        path = self._profile_aliases_path()
+        if not path.exists():
+            return {}
+
+        try:
+            with path.open("r", encoding="utf-8") as f:
+                return json.load(f)
+        except (OSError, json.JSONDecodeError):
+            return {}
+
+    def _save_profile_alias(self, name: str) -> None:
+        path = self._profile_aliases_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        aliases = self._load_profile_aliases()
+        aliases[self._profile_alias_key()] = name
+
+        with path.open("w", encoding="utf-8") as f:
+            json.dump(aliases, f, indent=2, sort_keys=True)
+
+    def _load_profile_alias(self) -> Optional[str]:
+        aliases = self._load_profile_aliases()
+        value = aliases.get(self._profile_alias_key())
+
+        if isinstance(value, str) and value.strip():
+            return value
+
+        return None
+

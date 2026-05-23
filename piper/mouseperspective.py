@@ -79,7 +79,7 @@ class MousePerspective(Gtk.Overlay):
             "active-profile-changed",
             self._on_active_profile_changed,
         )
-
+        
         active_profile = device.active_profile
         assert active_profile is not None
         self._set_profile(active_profile)
@@ -94,7 +94,8 @@ class MousePerspective(Gtk.Overlay):
             connect_signal_with_weak_ref(
                 self, profile, "notify::dirty", self._on_profile_notify_dirty
             )
-            row = ProfileRow(profile)
+            row = ProfileRow(self._device, profile)
+            row.connect("notify::name", self._on_profile_row_notify_name)
             self.listbox_profiles.insert(row, profile.index)
 
         self._on_profile_notify_disabled(active_profile, None)
@@ -212,3 +213,9 @@ class MousePerspective(Gtk.Overlay):
             # profiles on the device that are dirty.
             style_context.remove_class("suggested-action")
             self.button_commit.set_sensitive(False)
+
+    def _on_profile_row_notify_name(
+    self, row: ProfileRow, pspec: Optional[GObject.ParamSpec]
+    ) -> None:
+        if row.profile is self._profile:
+            self.label_profile.set_label(row.name)
