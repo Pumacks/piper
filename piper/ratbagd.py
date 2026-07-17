@@ -256,6 +256,40 @@ class _RatbagdDBus(GObject.GObject):
             print(e.message, file=sys.stderr)
             raise
 
+    def _dbus_call_async(self, method, type, *value, callback):
+        """Call a ratbagd method without blocking GTK's main loop.
+
+        ``callback`` receives the result and an exception, respectively. This
+        mirrors :meth:`_dbus_call` while allowing interactive controls to stay
+        responsive while ratbagd communicates with a device.
+        """
+        val = GLib.Variant(f"({type})", value)
+
+        def on_call_finished(proxy, result, _user_data):
+            try:
+                response = proxy.call_finish(result).unpack()[0]
+                if response in EXCEPTION_TABLE:
+                    raise EXCEPTION_TABLE[response]()
+            except GLib.Error as error:
+                if error.code == Gio.IOErrorEnum.TIMED_OUT:
+                    callback(None, RatbagdDBusTimeoutError(error.message))
+                else:
+                    callback(None, error)
+            except RatbagError as error:
+                callback(None, error)
+            else:
+                callback(response, None)
+
+        self._proxy.call(
+            method,
+            val,
+            Gio.DBusCallFlags.NO_AUTO_START,
+            2000,
+            None,
+            on_call_finished,
+            None,
+        )
+
     def __eq__(self, other):
         return other and self._object_path == other._object_path
 
@@ -667,6 +701,16 @@ class RatbagdProfile(_RatbagdDBus):
         ret = self._dbus_call("SetActive", "")
         self._set_dbus_property("IsActive", "b", True, readwrite=False)
         return ret
+
+    def set_active_async(self, callback):
+        """Activate this profile without blocking the user interface."""
+
+        def on_complete(result, error):
+            if error is None:
+                self._set_dbus_property("IsActive", "b", True, readwrite=False)
+            callback(result, error)
+
+        self._dbus_call_async("SetActive", "", callback=on_complete)
 
 
 class RatbagdResolution(_RatbagdDBus):

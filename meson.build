@@ -53,6 +53,8 @@ if enable_runtime_dependency_checks
     ]
 
     dependency('pygobject-3.0', required: true)
+    dependency('gtk4', version: '>=4.10')
+    dependency('libadwaita-1', version: '>=1.4')
 else
     # external python modules that are required for building piper
     python_modules = ['lxml']
@@ -104,8 +106,17 @@ configure_file(input: 'piper.in',
                configuration: config_piper,
                install_dir: bindir)
 
+configure_file(input: 'piper-better-ui.in',
+               output: 'piper-better-ui',
+               configuration: config_piper,
+               install: false)
+
 configure_file(input: 'piper.in',
                output: 'piper.devel',
+               configuration: config_piper_devel)
+
+configure_file(input: 'piper-better-ui.in',
+               output: 'piper-better-ui.devel',
                configuration: config_piper_devel)
 
 if meson.version().version_compare('>=0.59.0')

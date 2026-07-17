@@ -1,0 +1,20 @@
+#!/usr/bin/env python3
+
+import os
+import sys
+
+import gi
+
+gi.require_version("Adw", "1")
+gi.require_version("Gtk", "4.0")
+from gi.repository import Adw, Gio
+
+@devel@
+resource = Gio.resource_load(os.path.join('@pkgdatadir@', 'piper.gresource'))
+Gio.Resource._register(resource)
+
+if __name__ == "__main__":
+    from piper.better_ui import BetterUiApplication
+
+    app = BetterUiApplication(@RATBAGD_API_VERSION@)
+    sys.exit(app.run(sys.argv))
