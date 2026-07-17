@@ -8,7 +8,7 @@ from pathlib import Path
 
 import gi
 
-from piper.ratbagd import RatbagdProfile
+from piper.ratbagd import RatbagdDevice, RatbagdProfile
 
 from .util.gobject import connect_signal_with_weak_ref
 
@@ -25,8 +25,14 @@ class ProfileRow(Gtk.ListBoxRow):
 
     title: Gtk.Label = Gtk.Template.Child()  # type: ignore
 
-    def __init__(self, device: RatbagdDevice, profile: RatbagdProfile, *args, **kwargs) -> None:
-        Gtk.ListBoxRow.__init__(self)
+    def __init__(
+        self,
+        device: RatbagdDevice,
+        profile: RatbagdProfile,
+        *args,
+        **kwargs,
+    ) -> None:
+        Gtk.ListBoxRow.__init__(self, *args, **kwargs)
         self._device = device
         self._profile = profile
         connect_signal_with_weak_ref(
@@ -57,11 +63,14 @@ class ProfileRow(Gtk.ListBoxRow):
     @Gtk.Template.Callback("_on_rename_button_clicked")
     def _on_rename_button_clicked(self, button: Gtk.Button) -> None:
         dialog = Gtk.Dialog(
-     		title="rename Profile",
-       		transient_for=self.get_toplevel(),
-         	flags=0)
-        dialog.add_buttons(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
-                           Gtk.STOCK_OK, Gtk.ResponseType.OK)
+            title="Rename Profile", transient_for=self.get_toplevel(), flags=0
+        )
+        dialog.add_buttons(
+            Gtk.STOCK_CANCEL,
+            Gtk.ResponseType.CANCEL,
+            Gtk.STOCK_OK,
+            Gtk.ResponseType.OK,
+        )
 
         entry = Gtk.Entry()
         entry.set_text(self.title.get_text())
@@ -74,16 +83,22 @@ class ProfileRow(Gtk.ListBoxRow):
         if response == Gtk.ResponseType.OK:
             new_name = entry.get_text().strip()
             if new_name:
-                self._save_profile_alias(new_name)
-                self.title.set_text(new_name)
-                self.notify("name")
+                self.set_name(new_name)
 
         dialog.destroy()
-
 
     def set_active(self) -> None:
         """Activates the profile paired with this row."""
         self._profile.set_active()
+
+    def set_name(self, name: str) -> None:
+        """Persist and display a local name for the onboard profile."""
+        name = name.strip()
+        if not name:
+            return
+        self._save_profile_alias(name)
+        self.title.set_text(name)
+        self.notify("name")
 
     @GObject.Property
     def name(self) -> str:
@@ -129,4 +144,3 @@ class ProfileRow(Gtk.ListBoxRow):
             return value
 
         return None
-

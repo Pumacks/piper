@@ -136,6 +136,11 @@ test(
 )
 
 test(
+  'virtual-profiles',
+  find_program('tests/virtual-profiles-test.py'),
+)
+
+test(
   'files-in-git',
   find_program('tests/check-files-in-git.sh'),
   args : [meson.current_source_dir()],

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 
 from gettext import gettext as _
+from pathlib import Path
 from typing import Optional
 
 from .buttonspage import ButtonsPage
@@ -10,6 +11,12 @@ from .resolutionspage import ResolutionsPage
 from .advancedpage import AdvancedPage
 from .ledspage import LedsPage
 from .util.gobject import connect_signal_with_weak_ref
+from .virtualprofilerow import VirtualProfileRow
+from .virtualprofiles import (
+    VirtualProfileError,
+    VirtualProfileStore,
+    apply_snapshot,
+)
 
 import gi
 
@@ -29,7 +36,9 @@ class MousePerspective(Gtk.Overlay):
     button_profile: Gtk.Button = Gtk.Template.Child()  # type: ignore
     label_profile: Gtk.Label = Gtk.Template.Child()  # type: ignore
     listbox_profiles: Gtk.ListBox = Gtk.Template.Child()  # type: ignore
+    listbox_virtual_profiles: Gtk.ListBox = Gtk.Template.Child()  # type: ignore
     notification_error: Gtk.Revealer = Gtk.Template.Child()  # type: ignore
+    popover_profiles: Gtk.Popover = Gtk.Template.Child()  # type: ignore
     stack: Gtk.Stack = Gtk.Template.Child()  # type: ignore
 
     def __init__(self, *args, **kwargs) -> None:
@@ -38,6 +47,10 @@ class MousePerspective(Gtk.Overlay):
         self._device: Optional[RatbagdDevice] = None
         self._profile: Optional[RatbagdProfile] = None
         self._notification_error_timeout_id = 0
+        config_path = (
+            Path(GLib.get_user_config_dir()) / "piper" / "virtual_profiles.json"
+        )
+        self._virtual_profiles = VirtualProfileStore(config_path)
 
     @GObject.Property
     def name(self) -> str:
@@ -79,7 +92,7 @@ class MousePerspective(Gtk.Overlay):
             "active-profile-changed",
             self._on_active_profile_changed,
         )
-        
+
         active_profile = device.active_profile
         assert active_profile is not None
         self._set_profile(active_profile)
@@ -101,6 +114,7 @@ class MousePerspective(Gtk.Overlay):
         self._on_profile_notify_disabled(active_profile, None)
 
         self._select_profile_row(active_profile)
+        self._refresh_virtual_profiles()
 
     def _select_profile_row(self, profile: RatbagdProfile) -> None:
         for row in self.listbox_profiles.get_children():
@@ -187,6 +201,104 @@ class MousePerspective(Gtk.Overlay):
             profile.disabled = False
             break
 
+    @Gtk.Template.Callback("_on_save_virtual_profile_button_clicked")
+    def _on_save_virtual_profile_button_clicked(self, _button: Gtk.Button) -> None:
+        assert self._device is not None
+        assert self._profile is not None
+
+        dialog = Gtk.Dialog(
+            title=_("Save Virtual Profile"),
+            transient_for=self.get_toplevel(),
+            modal=True,
+        )
+        dialog.add_buttons(
+            Gtk.STOCK_CANCEL,
+            Gtk.ResponseType.CANCEL,
+            Gtk.STOCK_SAVE,
+            Gtk.ResponseType.OK,
+        )
+        entry = Gtk.Entry(activates_default=True)
+        entry.set_placeholder_text(_("Profile name"))
+        entry.set_margin_start(12)
+        entry.set_margin_end(12)
+        entry.set_margin_top(12)
+        entry.set_margin_bottom(12)
+        dialog.get_content_area().add(entry)
+        dialog.set_default_response(Gtk.ResponseType.OK)
+        dialog.show_all()
+
+        if dialog.run() == Gtk.ResponseType.OK:
+            name = entry.get_text().strip()
+            if name:
+                try:
+                    self._virtual_profiles.save(name, self._device.model, self._profile)
+                    self._refresh_virtual_profiles()
+                except VirtualProfileError as error:
+                    self._show_virtual_profile_error(str(error))
+        dialog.destroy()
+
+    @Gtk.Template.Callback("_on_virtual_profile_row_activated")
+    def _on_virtual_profile_row_activated(
+        self, _listbox: Gtk.ListBox, row: VirtualProfileRow
+    ) -> None:
+        assert self._profile is not None
+        try:
+            name = row.virtual_profile["name"]
+            if not isinstance(name, str) or not name.strip():
+                raise VirtualProfileError("This virtual profile has an invalid name")
+            apply_snapshot(row.virtual_profile["settings"], self._profile)
+        except (KeyError, TypeError, ValueError, VirtualProfileError) as error:
+            self._show_virtual_profile_error(str(error))
+            return
+
+        self._rename_selected_profile(name)
+        self.popover_profiles.popdown()
+        # Rebuild pages so every control reflects the newly loaded values.
+        self._set_profile(self._profile)
+
+    def _rename_selected_profile(self, name: str) -> None:
+        for row in self.listbox_profiles.get_children():
+            if row.profile is self._profile:
+                row.set_name(name)
+                return
+
+    def _on_virtual_profile_delete_requested(
+        self, _row: VirtualProfileRow, virtual_profile: dict
+    ) -> None:
+        try:
+            self._virtual_profiles.delete(virtual_profile["id"])
+            self._refresh_virtual_profiles()
+        except (KeyError, VirtualProfileError) as error:
+            self._show_virtual_profile_error(str(error))
+
+    def _refresh_virtual_profiles(self) -> None:
+        assert self._device is not None
+        self.listbox_virtual_profiles.foreach(Gtk.Widget.destroy)
+        try:
+            profiles = self._virtual_profiles.list_for_model(self._device.model)
+        except VirtualProfileError as error:
+            self._show_virtual_profile_error(str(error))
+            return
+
+        for virtual_profile in profiles:
+            row = VirtualProfileRow(virtual_profile)
+            row.connect(
+                "delete-requested", self._on_virtual_profile_delete_requested
+            )
+            self.listbox_virtual_profiles.add(row)
+
+    def _show_virtual_profile_error(self, message: str) -> None:
+        dialog = Gtk.MessageDialog(
+            transient_for=self.get_toplevel(),
+            modal=True,
+            message_type=Gtk.MessageType.ERROR,
+            buttons=Gtk.ButtonsType.CLOSE,
+            text=_("Virtual profile error"),
+        )
+        dialog.format_secondary_text(message)
+        dialog.run()
+        dialog.destroy()
+
     def _on_profile_notify_disabled(
         self, profile: RatbagdProfile, pspec: Optional[GObject.ParamSpec]
     ) -> None:
@@ -215,7 +327,7 @@ class MousePerspective(Gtk.Overlay):
             self.button_commit.set_sensitive(False)
 
     def _on_profile_row_notify_name(
-    self, row: ProfileRow, pspec: Optional[GObject.ParamSpec]
+        self, row: ProfileRow, pspec: Optional[GObject.ParamSpec]
     ) -> None:
         if row.profile is self._profile:
             self.label_profile.set_label(row.name)
