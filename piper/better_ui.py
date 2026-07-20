@@ -32,6 +32,7 @@ from .ratbagd import (
     RatbagdUnavailableError,
     evcode_to_str,
 )
+from .profilenames import ProfileNameStore
 from .svg import get_svg
 from .virtualprofiles import (
     VirtualProfileError,
@@ -288,12 +289,15 @@ class BetterUiApplication(Adw.Application):
         self._window: Optional[Adw.ApplicationWindow] = None
         self._toast_overlay: Optional[Adw.ToastOverlay] = None
         self._apply_button: Optional[Gtk.Button] = None
+        self._profile_button: Optional[Gtk.MenuButton] = None
+        self._device_popover: Optional[Gtk.Popover] = None
         self._selected_device: Optional[RatbagdDevice] = None
         self._selected_profile: Optional[RatbagdProfile] = None
         self._draft = {}
         self._virtual_profiles = VirtualProfileStore(
             Path(GLib.get_user_config_dir()) / "piper" / "virtual_profiles.json"
         )
+        self._profile_names = ProfileNameStore()
         self._device_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.SINGLE)
         self._device_rows: Dict[str, Gtk.ListBoxRow] = {}
         self._content_page = Adw.NavigationPage.new(
@@ -318,25 +322,39 @@ class BetterUiApplication(Adw.Application):
         toolbar_view = Adw.ToolbarView()
         header_bar = Adw.HeaderBar()
         header_bar.set_title_widget(Adw.WindowTitle(title="Piper Next"))
+        self._profile_button = Gtk.MenuButton()
+        self._profile_button.set_visible(False)
+        self._profile_button.set_tooltip_text(_("Switch profile"))
+        header_bar.pack_start(self._profile_button)
         self._apply_button = Gtk.Button(label=_("Apply"))
         self._apply_button.add_css_class("suggested-action")
         self._apply_button.set_sensitive(False)
         self._apply_button.connect("clicked", self._on_apply_clicked)
         header_bar.pack_end(self._apply_button)
+        options_button = Gtk.MenuButton()
+        options_button.set_icon_name("open-menu-symbolic")
+        options_button.set_tooltip_text(_("Options and devices"))
+        self._device_popover = Gtk.Popover()
+        device_menu = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        device_menu.set_margin_top(8)
+        device_menu.set_margin_bottom(8)
+        device_menu.set_margin_start(8)
+        device_menu.set_margin_end(8)
+        device_heading = Gtk.Label(label=_("Devices"), xalign=0)
+        device_heading.add_css_class("heading")
+        device_menu.append(device_heading)
+        devices = Gtk.ScrolledWindow(min_content_width=260, max_content_height=360)
+        devices.set_propagate_natural_height(True)
+        devices.set_child(self._device_list)
+        device_menu.append(devices)
+        self._device_popover.set_child(device_menu)
+        options_button.set_popover(self._device_popover)
+        header_bar.pack_end(options_button)
         toolbar_view.add_top_bar(header_bar)
 
-        sidebar = Gtk.ScrolledWindow()
-        sidebar.set_child(self._device_list)
         self._device_list.connect("row-selected", self._on_device_selected)
-        sidebar_page = Adw.NavigationPage.new(sidebar, _("Devices"))
-
-        split_view = Adw.NavigationSplitView()
-        split_view.set_sidebar(sidebar_page)
-        split_view.set_content(self._content_page)
-        split_view.set_min_sidebar_width(220)
-        split_view.set_max_sidebar_width(320)
         self._toast_overlay = Adw.ToastOverlay()
-        self._toast_overlay.set_child(split_view)
+        self._toast_overlay.set_child(self._content_page)
         toolbar_view.set_content(self._toast_overlay)
         window.set_content(toolbar_view)
         return window
@@ -370,6 +388,8 @@ class BetterUiApplication(Adw.Application):
             row = self._device_list.get_first_child()
 
         if self._ratbag is None or not self._ratbag.devices:
+            if self._profile_button is not None:
+                self._profile_button.set_visible(False)
             self._content_page.set_child(
                 self._status_page(
                     _("No supported mouse found"),
@@ -410,11 +430,13 @@ class BetterUiApplication(Adw.Application):
         self._selected_device = device
         self._selected_profile = device.active_profile or device.profiles[0]
         self._draft = self._make_draft(self._selected_profile)
+        if self._device_popover is not None:
+            self._device_popover.popdown()
         self._show_device(device)
 
     def _device_page(self, device: RatbagdDevice) -> Gtk.Paned:
         page = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL, wide_handle=True)
-        page.set_position(390)
+        page.add_tick_callback(self._center_paned_on_first_frame)
 
         preview_panel = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         preview_panel.set_margin_top(24)
@@ -451,56 +473,7 @@ class BetterUiApplication(Adw.Application):
         preferences = Adw.PreferencesPage()
         preferences.set_title(_("Device settings"))
         preferences.set_vexpand(True)
-
-        profiles = Adw.PreferencesGroup(title=_("Onboard profiles"))
-        selector = Adw.ComboRow(title=_("Editing profile"))
-        selector.set_model(
-            Gtk.StringList.new(
-                [
-                    profile.name or _("Profile {}").format(profile.index + 1)
-                    for profile in device.profiles
-                ]
-            )
-        )
         assert self._selected_profile is not None
-        selector.set_selected(self._selected_profile.index)
-        selector.connect("notify::selected", self._on_profile_selected, device)
-        profiles.add(selector)
-
-        if RatbagdProfile.CAP_WRITABLE_NAME in self._selected_profile.capabilities:
-            name_row = Adw.EntryRow(title=_("Profile name"))
-            name_row.set_text(self._draft["name"])
-            name_row.connect("notify::text", self._on_profile_name_changed)
-            profiles.add(name_row)
-
-        if RatbagdProfile.CAP_DISABLE in self._selected_profile.capabilities:
-            enabled_row = Adw.SwitchRow(title=_("Profile enabled"))
-            enabled_row.set_active(not self._selected_profile.disabled)
-            enabled_row.set_sensitive(not self._selected_profile.is_active)
-            enabled_row.connect(
-                "notify::active",
-                self._on_profile_enabled_changed,
-                self._selected_profile,
-            )
-            profiles.add(enabled_row)
-
-        for profile in device.profiles:
-            name = profile.name or _("Profile {}").format(profile.index + 1)
-            subtitle = _("Disabled") if profile.disabled else _("Available")
-            if profile.is_active:
-                subtitle = _("Active")
-            row = Adw.ActionRow(title=name, subtitle=subtitle)
-            activate_button = Gtk.Button(label=_("Activate"))
-            activate_button.set_valign(Gtk.Align.CENTER)
-            activate_button.set_sensitive(
-                not profile.disabled and not profile.is_active
-            )
-            activate_button.connect(
-                "clicked", self._on_activate_profile_clicked, device, profile
-            )
-            row.add_suffix(activate_button)
-            profiles.add(row)
-        preferences.add(profiles)
         if self._selected_profile.resolutions:
             preferences.add(self._resolution_group())
         if self._selected_profile.buttons:
@@ -516,6 +489,151 @@ class BetterUiApplication(Adw.Application):
         page.set_resize_end_child(True)
         page.set_shrink_end_child(False)
         return page
+
+    def _refresh_profile_menu(self, device) -> None:
+        assert self._profile_button is not None
+        assert self._selected_profile is not None
+        self._profile_button.set_label(
+            self._profile_display_name(device, self._selected_profile)
+        )
+        self._profile_button.set_visible(True)
+
+        popover = Gtk.Popover()
+        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        content.set_margin_top(8)
+        content.set_margin_bottom(8)
+        content.set_margin_start(8)
+        content.set_margin_end(8)
+        heading = Gtk.Label(label=_("Profiles"), xalign=0)
+        heading.add_css_class("heading")
+        content.append(heading)
+        profiles = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
+        profiles.add_css_class("boxed-list")
+        profiles.connect("row-activated", self._on_profile_row_activated, device)
+        for profile in device.profiles:
+            profiles.append(self._profile_menu_row(device, profile))
+        content.append(profiles)
+        popover.set_child(content)
+        self._profile_button.set_popover(popover)
+
+    def _profile_menu_row(self, device, profile) -> Gtk.ListBoxRow:
+        row = Gtk.ListBoxRow()
+        row.profile = profile  # type: ignore[attr-defined]
+        content = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        content.set_margin_top(6)
+        content.set_margin_bottom(6)
+        content.set_margin_start(8)
+        content.set_margin_end(8)
+
+        name = self._profile_display_name(device, profile)
+        name_stack = Gtk.Stack(hexpand=True)
+        label = Gtk.Label(label=name, xalign=0, hexpand=True)
+        if profile.disabled:
+            label.add_css_class("dim-label")
+        entry = Gtk.Entry(text=name, hexpand=True, activates_default=True)
+        entry.set_max_length(64)
+        entry.connect(
+            "activate",
+            self._on_profile_name_entry_activated,
+            device,
+            profile,
+            label,
+            name_stack,
+        )
+        keys = Gtk.EventControllerKey()
+        keys.connect("key-pressed", self._on_profile_name_key_pressed, name_stack)
+        entry.add_controller(keys)
+        name_stack.add_named(label, "label")
+        name_stack.add_named(entry, "entry")
+        name_stack.set_visible_child_name("label")
+        content.append(name_stack)
+
+        edit = Gtk.Button.new_from_icon_name("document-edit-symbolic")
+        edit.add_css_class("flat")
+        edit.set_tooltip_text(_("Rename profile"))
+        edit.connect("clicked", self._on_profile_edit_clicked, name_stack, entry)
+        content.append(edit)
+        virtual = self._profile_virtual_menu(device, profile)
+        content.append(virtual)
+        row.set_child(content)
+        return row
+
+    def _profile_virtual_menu(self, device, profile) -> Gtk.MenuButton:
+        button = Gtk.MenuButton()
+        button.set_icon_name("object-flip-horizontal-symbolic")
+        button.add_css_class("flat")
+        button.set_tooltip_text(_("Replace this slot with a virtual profile"))
+        popover = Gtk.Popover()
+        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        content.set_margin_top(8)
+        content.set_margin_bottom(8)
+        content.set_margin_start(8)
+        content.set_margin_end(8)
+        heading = Gtk.Label(label=_("Choose a virtual profile"), xalign=0)
+        heading.add_css_class("heading")
+        content.append(heading)
+        search = Gtk.SearchEntry(placeholder_text=_("Search virtual profiles"))
+        content.append(search)
+        choices = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
+        choices.add_css_class("boxed-list")
+        choices.set_filter_func(
+            lambda row: search.get_text().casefold() in row.virtual_name.casefold()
+        )
+        search.connect("search-changed", lambda _entry: choices.invalidate_filter())
+        choices.connect(
+            "row-activated",
+            self._on_virtual_profile_choice_activated,
+            device,
+            profile,
+            popover,
+        )
+        try:
+            virtual_profiles = self._virtual_profiles.list_for_model(device.model)
+        except VirtualProfileError:
+            virtual_profiles = []
+        choice_count = 0
+        for virtual_profile in virtual_profiles:
+            name = virtual_profile.get("name")
+            if not isinstance(name, str) or not name.strip():
+                continue
+            choice = Gtk.ListBoxRow()
+            choice.virtual_name = name  # type: ignore[attr-defined]
+            choice.virtual_profile = virtual_profile  # type: ignore[attr-defined]
+            choice.set_child(
+                Gtk.Label(
+                    label=name,
+                    xalign=0,
+                    margin_top=8,
+                    margin_bottom=8,
+                    margin_start=8,
+                    margin_end=8,
+                )
+            )
+            choices.append(choice)
+            choice_count += 1
+        if choice_count == 0:
+            empty = Gtk.Label(label=_("No virtual profiles saved"))
+            empty.add_css_class("dim-label")
+            content.append(empty)
+            button.set_sensitive(False)
+        else:
+            scroller = Gtk.ScrolledWindow(
+                min_content_width=300, max_content_height=320
+            )
+            scroller.set_propagate_natural_height(True)
+            scroller.set_child(choices)
+            content.append(scroller)
+        popover.set_child(content)
+        button.set_popover(popover)
+        return button
+
+    @staticmethod
+    def _center_paned_on_first_frame(paned, _frame_clock) -> bool:
+        width = paned.get_width()
+        if width <= 1:
+            return True
+        paned.set_position(width // 2)
+        return False
 
     def _buttons_group(self, preview: MousePreview) -> Adw.PreferencesGroup:
         assert self._selected_profile is not None
@@ -842,15 +960,29 @@ class BetterUiApplication(Adw.Application):
             group.add(row)
         return group
 
-    @staticmethod
-    def _make_draft(profile: RatbagdProfile) -> dict:
+    def _profile_display_name(self, device, profile) -> str:
+        return (
+            self._profile_names.get(device, profile)
+            or profile.name
+            or _("Profile {}").format(profile.index + 1)
+        )
+
+    def _set_profile_name_from_virtual(self, device, profile, name: str) -> None:
+        self._profile_names.set(device, profile, name)
+        if RatbagdProfile.CAP_WRITABLE_NAME in profile.capabilities:
+            profile.name = name
+        if profile is self._selected_profile:
+            self._draft["name"] = name
+
+    def _make_draft(self, profile: RatbagdProfile) -> dict:
+        assert self._selected_device is not None
         active_index = 0
         for index, resolution in enumerate(profile.resolutions):
             if resolution.is_active:
                 active_index = index
                 break
         return {
-            "name": profile.name or _("Profile {}").format(profile.index + 1),
+            "name": self._profile_display_name(self._selected_device, profile),
             "resolutions": [
                 resolution.resolution[0] for resolution in profile.resolutions
             ],
@@ -872,26 +1004,120 @@ class BetterUiApplication(Adw.Application):
     def _on_devices_changed(self, *_args) -> None:
         self._refresh_devices()
 
-    def _on_profile_selected(self, selector, _pspec, device: RatbagdDevice) -> None:
-        selected = selector.get_selected()
-        if selected == Gtk.INVALID_LIST_POSITION:
+    def _on_profile_row_activated(self, _listbox, row, device) -> None:
+        profile = row.profile  # type: ignore[attr-defined]
+        if profile.disabled:
+            if RatbagdProfile.CAP_DISABLE not in profile.capabilities:
+                self._add_toast(_("This profile cannot be enabled"))
+                return
+            try:
+                profile.disabled = False
+            except (GLib.Error, RatbagError, ValueError):
+                self._add_toast(_("Could not enable profile"))
+                return
+            self._set_apply_sensitive(True)
+        self._selected_profile = profile
+        self._draft = self._make_draft(profile)
+        if self._profile_button is not None:
+            popover = self._profile_button.get_popover()
+            if popover is not None:
+                popover.popdown()
+        if profile.is_active:
+            self._set_apply_sensitive(any(item.dirty for item in device.profiles))
+            self._show_device(device)
             return
-        self._selected_profile = device.profiles[selected]
+
+        profile.set_active_async(
+            lambda _result, error: self._on_profile_switch_finished(
+                device, profile, error
+            )
+        )
+
+    def _on_profile_switch_finished(self, device, profile, error) -> None:
+        if error is not None:
+            self._selected_profile = device.active_profile or device.profiles[0]
+            self._add_toast(_("Could not switch profile"))
+        else:
+            self._selected_profile = profile
+            self._add_toast(_("Profile switched"))
         self._draft = self._make_draft(self._selected_profile)
-        self._set_apply_sensitive(False)
+        self._set_apply_sensitive(any(item.dirty for item in device.profiles))
         self._show_device(device)
 
-    def _on_profile_name_changed(self, row, _pspec) -> None:
-        self._draft["name"] = row.get_text()
-        self._set_apply_sensitive(True)
+    @staticmethod
+    def _on_profile_edit_clicked(_button, stack, entry) -> None:
+        stack.set_visible_child_name("entry")
+        entry.grab_focus()
+        entry.select_region(0, -1)
 
-    def _on_profile_enabled_changed(self, row, _pspec, profile) -> None:
-        try:
-            profile.disabled = not row.get_active()
-        except (GLib.Error, RatbagError, ValueError):
-            self._add_toast(_("Could not change profile availability"))
+    @staticmethod
+    def _on_profile_name_key_pressed(_controller, keyval, _keycode, _state, stack):
+        if keyval != Gdk.KEY_Escape:
+            return False
+        stack.set_visible_child_name("label")
+        return True
+
+    def _on_profile_name_entry_activated(
+        self, entry, device, profile, label, stack
+    ) -> None:
+        name = entry.get_text().strip()
+        if not name:
+            self._add_toast(_("Profile name cannot be empty"))
             return
+        try:
+            self._profile_names.set(device, profile, name)
+            if RatbagdProfile.CAP_WRITABLE_NAME in profile.capabilities:
+                profile.name = name
+                self._set_apply_sensitive(True)
+        except (GLib.Error, OSError, RatbagError, ValueError):
+            self._add_toast(_("Could not rename profile"))
+            return
+        if profile is self._selected_profile:
+            self._draft["name"] = name
+            if self._profile_button is not None:
+                self._profile_button.set_label(name)
+        label.set_text(name)
+        stack.set_visible_child_name("label")
+        self._add_toast(_("Profile renamed"))
+
+    def _on_virtual_profile_choice_activated(
+        self, _listbox, row, device, profile, popover
+    ) -> None:
+        self._on_load_virtual_into_profile_clicked(
+            None, device, profile, row.virtual_profile, popover
+        )
+
+    def _on_load_virtual_into_profile_clicked(
+        self, _button, device, profile, virtual_profile, popover
+    ) -> None:
+        try:
+            virtual_name = virtual_profile["name"]
+            if not isinstance(virtual_name, str) or not virtual_name.strip():
+                raise VirtualProfileError("This virtual profile has an invalid name")
+            apply_snapshot(virtual_profile["settings"], profile)
+            self._set_profile_name_from_virtual(device, profile, virtual_name)
+        except (
+            KeyError,
+            OSError,
+            TypeError,
+            ValueError,
+            VirtualProfileError,
+            GLib.Error,
+        ) as error:
+            self._add_toast(str(error))
+            return
+        popover.popdown()
+        if profile is self._selected_profile:
+            self._draft = self._make_draft(profile)
+            self._show_device(device)
+        else:
+            self._refresh_profile_menu(device)
         self._set_apply_sensitive(True)
+        self._add_toast(
+            _("Virtual profile loaded into {}; press Apply to write it").format(
+                self._profile_display_name(device, profile)
+            )
+        )
 
     def _on_dpi_changed(self, row, _pspec, index: int, dpi_values: list) -> None:
         selected = row.get_selected()
@@ -1049,12 +1275,16 @@ class BetterUiApplication(Adw.Application):
         assert self._selected_device is not None
         assert self._selected_profile is not None
         try:
-            name = virtual_profile["name"]
-            if not isinstance(name, str) or not name.strip():
+            virtual_name = virtual_profile["name"]
+            if not isinstance(virtual_name, str) or not virtual_name.strip():
                 raise VirtualProfileError("This virtual profile has an invalid name")
             apply_snapshot(virtual_profile["settings"], self._selected_profile)
+            self._set_profile_name_from_virtual(
+                self._selected_device, self._selected_profile, virtual_name
+            )
         except (
             KeyError,
+            OSError,
             TypeError,
             ValueError,
             VirtualProfileError,
@@ -1063,7 +1293,6 @@ class BetterUiApplication(Adw.Application):
             self._add_toast(str(error))
             return
         self._draft = self._make_draft(self._selected_profile)
-        self._draft["name"] = name
         self._set_apply_sensitive(True)
         self._add_toast(
             _("Virtual profile loaded; press Apply to write it to the mouse")
@@ -1082,20 +1311,8 @@ class BetterUiApplication(Adw.Application):
         self._add_toast(_("Virtual profile deleted"))
         self._show_device(self._selected_device)
 
-    def _on_activate_profile_clicked(self, button, device, profile) -> None:
-        button.set_sensitive(False)
-        profile.set_active_async(
-            lambda _result, error: self._on_profile_activated(device, error)
-        )
-
-    def _on_profile_activated(self, device: RatbagdDevice, error) -> None:
-        if error is not None:
-            self._add_toast(_("Could not activate profile"))
-        else:
-            self._add_toast(_("Profile activated"))
-        self._show_device(device)
-
     def _show_device(self, device: RatbagdDevice) -> None:
+        self._refresh_profile_menu(device)
         self._content_page.set_child(self._device_page(device))
         self._content_page.set_title(device.name)
 
@@ -1104,11 +1321,16 @@ class BetterUiApplication(Adw.Application):
         assert self._selected_profile is not None
         profile = self._selected_profile
         try:
+            name = self._draft["name"].strip()
+            if not name:
+                self._add_toast(_("Profile name cannot be empty"))
+                return
+            self._profile_names.set(self._selected_device, profile, name)
             if (
                 RatbagdProfile.CAP_WRITABLE_NAME in profile.capabilities
-                and self._draft["name"] != profile.name
+                and name != profile.name
             ):
-                profile.name = self._draft["name"]
+                profile.name = name
             for value, resolution in zip(
                 self._draft["resolutions"], profile.resolutions
             ):
@@ -1130,12 +1352,13 @@ class BetterUiApplication(Adw.Application):
                 led.brightness = values["brightness"]
                 led.effect_duration = values["effect_duration"]
             self._selected_device.commit()
-        except (GLib.Error, RatbagError, ValueError):
+        except (GLib.Error, OSError, RatbagError, ValueError):
             self._add_toast(_("Could not apply changes"))
             return
 
         self._set_apply_sensitive(False)
         self._add_toast(_("Changes applied"))
+        self._show_device(self._selected_device)
 
     def _set_apply_sensitive(self, sensitive: bool) -> None:
         if self._apply_button is not None:
@@ -1152,6 +1375,8 @@ class BetterUiApplication(Adw.Application):
         )
 
     def _show_error(self, title: str, description: str) -> None:
+        if self._profile_button is not None:
+            self._profile_button.set_visible(False)
         self._content_page.set_child(self._status_page(title, description))
         self._content_page.set_title(_("Piper Next"))
 

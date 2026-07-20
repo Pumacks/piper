@@ -243,15 +243,15 @@ class MousePerspective(Gtk.Overlay):
     ) -> None:
         assert self._profile is not None
         try:
-            name = row.virtual_profile["name"]
-            if not isinstance(name, str) or not name.strip():
+            virtual_name = row.virtual_profile["name"]
+            if not isinstance(virtual_name, str) or not virtual_name.strip():
                 raise VirtualProfileError("This virtual profile has an invalid name")
             apply_snapshot(row.virtual_profile["settings"], self._profile)
         except (KeyError, TypeError, ValueError, VirtualProfileError) as error:
             self._show_virtual_profile_error(str(error))
             return
 
-        self._rename_selected_profile(name)
+        self._rename_selected_profile(virtual_name)
         self.popover_profiles.popdown()
         # Rebuild pages so every control reflects the newly loaded values.
         self._set_profile(self._profile)

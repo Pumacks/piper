@@ -9,6 +9,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from piper.ratbagd import RatbagdButton, RatbagdResolution  # noqa: E402
+from piper.profilenames import ProfileNameStore  # noqa: E402
 from piper.virtualprofiles import (
     VirtualProfileError,
     VirtualProfileStore,
@@ -62,6 +63,8 @@ class FakeLed:
 
 class FakeProfile:
     def __init__(self):
+        self.index = 0
+        self.name = "Onboard"
         self.report_rate = 1000
         self.report_rates = [125, 500, 1000]
         self.angle_snapping = 0
@@ -91,6 +94,7 @@ class VirtualProfileTest(unittest.TestCase):
         self.assertEqual(target.resolutions[0].resolution, (2050,))
         self.assertEqual(target.buttons[0].mapping, 1)
         self.assertEqual(target.leds[0].color, (10, 20, 30))
+        self.assertEqual(target.name, "Onboard")
 
     def test_incompatible_layout_is_rejected_before_changes(self):
         source = FakeProfile()
@@ -116,6 +120,22 @@ class VirtualProfileTest(unittest.TestCase):
             store.delete(saved["id"])
             self.assertEqual(store.list_for_model("g502"), [])
             self.assertEqual(json.loads(path.read_text())["version"], 1)
+
+    def test_local_profile_names_are_persistent_and_slot_specific(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "profile_names.json"
+            store = ProfileNameStore(path)
+            device = type("Device", (), {"name": "Test Mouse"})()
+            first = FakeProfile()
+            second = FakeProfile()
+            second.index = 1
+
+            store.set(device, first, "Gaming")
+            store.set(device, second, "Desktop")
+
+            reloaded = ProfileNameStore(path)
+            self.assertEqual(reloaded.get(device, first), "Gaming")
+            self.assertEqual(reloaded.get(device, second), "Desktop")
 
 
 if __name__ == "__main__":

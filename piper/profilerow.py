@@ -3,17 +3,15 @@
 import sys
 from typing import Optional
 
-import json
-from pathlib import Path
-
 import gi
 
 from piper.ratbagd import RatbagdDevice, RatbagdProfile
 
+from .profilenames import ProfileNameStore
 from .util.gobject import connect_signal_with_weak_ref
 
 gi.require_version("Gtk", "3.0")
-from gi.repository import GLib, GObject, Gtk  # noqa
+from gi.repository import GObject, Gtk  # noqa
 
 
 @Gtk.Template(resource_path="/org/freedesktop/Piper/ui/ProfileRow.ui")
@@ -35,11 +33,12 @@ class ProfileRow(Gtk.ListBoxRow):
         Gtk.ListBoxRow.__init__(self, *args, **kwargs)
         self._device = device
         self._profile = profile
+        self._profile_names = ProfileNameStore()
         connect_signal_with_weak_ref(
             self, self._profile, "notify::disabled", self._on_profile_notify_disabled
         )
 
-        name = self._load_profile_alias() or profile.name
+        name = self._profile_names.get(device, profile) or profile.name
         if not name:
             name = f"Profile {profile.index}"
 
@@ -96,7 +95,7 @@ class ProfileRow(Gtk.ListBoxRow):
         name = name.strip()
         if not name:
             return
-        self._save_profile_alias(name)
+        self._profile_names.set(self._device, self._profile, name)
         self.title.set_text(name)
         self.notify("name")
 
@@ -107,40 +106,3 @@ class ProfileRow(Gtk.ListBoxRow):
     @GObject.Property
     def profile(self) -> RatbagdProfile:
         return self._profile
-
-    def _profile_aliases_path(self) -> Path:
-        return Path(GLib.get_user_config_dir()) / "piper" / "profile_names.json"
-
-    def _profile_alias_key(self) -> str:
-        device_name = getattr(self._device, "name", "unknown-device")
-        return f"{device_name}:{self._profile.index}"
-
-    def _load_profile_aliases(self) -> dict:
-        path = self._profile_aliases_path()
-        if not path.exists():
-            return {}
-
-        try:
-            with path.open("r", encoding="utf-8") as f:
-                return json.load(f)
-        except (OSError, json.JSONDecodeError):
-            return {}
-
-    def _save_profile_alias(self, name: str) -> None:
-        path = self._profile_aliases_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-
-        aliases = self._load_profile_aliases()
-        aliases[self._profile_alias_key()] = name
-
-        with path.open("w", encoding="utf-8") as f:
-            json.dump(aliases, f, indent=2, sort_keys=True)
-
-    def _load_profile_alias(self) -> Optional[str]:
-        aliases = self._load_profile_aliases()
-        value = aliases.get(self._profile_alias_key())
-
-        if isinstance(value, str) and value.strip():
-            return value
-
-        return None
