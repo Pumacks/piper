@@ -1,110 +1,274 @@
-Piper
-=====
+# Piper Next
 
-Piper is a GTK+ application to configure gaming mice. Piper is merely a
-graphical frontend to the ratbagd DBus daemon, see [the libratbag
-README](https://github.com/libratbag/libratbag/blob/master/README.md#running-ratbagd-as-dbus-activated-systemd-service)
-for instructions on how to run ratbagd.
+> A modern GTK4/libadwaita interface for configuring gaming mice through
+> [libratbag](https://github.com/libratbag/libratbag) and `ratbagd`.
 
-If you are running piper from git, we recommend using libratbag from git
-as well to make sure the latest bugfixes are applied.
+Piper Next is a community fork of
+[Piper](https://github.com/libratbag/piper). It keeps Piper's reliable device
+backend while redesigning the configuration experience around one focused,
+responsive workspace.
 
-Supported Devices
-=================
-Piper is merely a frontend, the list of supported devices depends on
-libratbag. See [the libratbag device
-files](https://github.com/libratbag/libratbag/tree/master/data/devices) for
-a list of all known devices.  The device-specific protocols usually have to
-be reverse-engineered and the features available may vary to the
-manufacturer's advertized features.
+The mouse stays visible, its controls are easier to find, profiles are easier
+to manage, and common changes no longer require jumping between separate
+pages.
 
-Screenshots
-===========
+> [!IMPORTANT]
+> This branch is actively migrating Piper from GTK3 to GTK4. The modern UI is
+> currently launched with `piper-better-ui.devel`; the regular `piper` launcher
+> remains available as a compatibility interface.
 
-![resolution configuration screenshot](https://github.com/libratbag/piper/blob/wiki/screenshots/piper-resolutionpage.png)
+## Preview
 
-![button configuration screenshot](https://github.com/libratbag/piper/blob/wiki/screenshots/piper-buttonpage.png)
+| Main configuration workspace | Profile and virtual-profile menu |
+| --- | --- |
+| _Screenshot placeholder — add `docs/screenshots/main-workspace.png`_ | _Screenshot placeholder — add `docs/screenshots/profile-menu.png`_ |
 
-![LED configuration screenshot](https://github.com/libratbag/piper/blob/wiki/screenshots/piper-ledpage.png)
+| Button highlighting and macros | Lighting and advanced settings |
+| --- | --- |
+| _Screenshot placeholder — add `docs/screenshots/button-highlighting.png`_ | _Screenshot placeholder — add `docs/screenshots/lighting.png`_ |
 
-And if you see the mousetrap, something isn't right. Usually this means that
-either ratbagd is not running (like in this screenshot), ratbagd needs to be
-updated to a newer version, or some other unexpected error occured.
+When screenshots are available, replace the placeholder text with:
 
-![The error page](https://github.com/libratbag/piper/blob/wiki/screenshots/piper-errorpage.png)
+```md
+![Piper Next main workspace](docs/screenshots/main-workspace.png)
+```
 
-Installing Piper
-================
+## What this fork adds
 
-See [our Wiki](https://github.com/libratbag/piper/wiki/Installation) for how to install Piper.
+Compared with the classic upstream Piper interface this fork provides:
 
-Building Piper from git
-=======================
+| Area | Classic Piper | Piper Next |
+| --- | --- | --- |
+| Interface | GTK3 with separate configuration pages | GTK4 and libadwaita with one unified workspace |
+| Mouse overview | Device view tied to individual pages | Persistent, larger mouse illustration beside all settings |
+| Button discovery | Physical button mapping in the classic button page | Hover or keyboard-focus a setting to highlight that button on the mouse |
+| Button assignment | Dialog-oriented assignment flow | Compact dropdowns plus dedicated keyboard-key and macro capture |
+| Macros | Key-sequence capture | Press/release recording, timing events, and a readable multi-line assignment preview |
+| Profiles | Onboard profile management | Header-bar switching, inline renaming, and persistent local names |
+| Virtual profiles | Not part of the classic workflow | Searchable, model-specific local snapshots with create, load, and confirmed delete actions |
+| DPI and advanced settings | Separate pages | DPI stages, polling rate, debounce, and angle snapping in the same workspace |
+| Lighting | Separate LED dialog | Inline effect, color, brightness, and speed controls |
+| Device artwork | Upstream device artwork | Additional artwork and mapping for devices developed in this fork, including the Logitech G502 X Plus |
 
-Piper uses the [meson build system](http://mesonbuild.com/). Run the following
-commands to clone Piper and initialize the build:
+The available controls still depend on what the mouse and its libratbag driver
+support. Piper cannot expose a feature that `ratbagd` does not report.
+
+## Using Piper Next
+
+### 1. Choose a profile
+
+Open the profile menu in the top-left of the window and select an onboard
+profile. Selecting it activates that profile.
+
+Each profile row also provides two actions:
+
+- **Edit** changes the profile name inline. Press **Enter** to save it or
+  **Escape** to cancel.
+- **Left/right arrows** open the virtual-profile chooser for that exact
+  onboard slot.
+
+Profile names are stored locally, so useful names remain available even when a
+mouse cannot store names in firmware. On supported devices the name is also
+written to the hardware when changes are applied.
+
+### 2. Configure buttons
+
+Button assignments appear first in the settings column. Hover over a row—or
+focus it with the keyboard—to highlight the corresponding physical button on
+the mouse illustration.
+
+Use a button's dropdown to assign:
+
+- another mouse button;
+- a special action such as DPI or profile switching;
+- a keyboard key;
+- a recorded macro; or
+- no action.
+
+For macros, choose **Record a macro**, enter the sequence, then select
+**Use assignment**. The recorded sequence is shown below the button row.
+
+### 3. Configure DPI, lighting, and advanced behavior
+
+The remaining groups are arranged below Button Assignments:
+
+- **DPI stages** — choose supported values and select the active stage;
+- **Lighting** — configure effects, color, brightness, and speed;
+- **Advanced** — adjust polling rate, debounce time, and angle snapping when
+  supported.
+
+### 4. Work with virtual profiles
+
+Virtual profiles are local, model-specific snapshots. They do not consume an
+additional onboard profile slot.
+
+Open the left/right-arrows menu on an onboard profile row to:
+
+- search saved virtual profiles;
+- create one with the **+** button;
+- load one into that onboard slot; or
+- delete one after a confirmation prompt.
+
+Loading a virtual profile replaces the selected slot's settings and name in
+the editor. The mouse is not written until **Apply** is pressed.
+
+### 5. Apply changes
+
+Most edits are staged first. Press **Apply** in the window header to write
+pending changes to the device.
+
+Profile activation happens immediately. Local profile names and virtual-profile
+library changes are also saved immediately.
+
+## Requirements
+
+Piper is a frontend. A working `ratbagd` service and a device supported by
+libratbag are required.
+
+Build and runtime dependencies include:
+
+- Python 3;
+- Meson and Ninja;
+- PyGObject;
+- GTK 4.10 or newer;
+- libadwaita 1.4 or newer;
+- librsvg and Cairo Python bindings;
+- `lxml` and `evdev`; and
+- libratbag/`ratbagd` with D-Bus API version 2.
+
+Package names vary by distribution. Check your distribution's Piper or
+libratbag build instructions when a dependency cannot be found.
+
+Supported devices are determined by libratbag. See the
+[libratbag device database](https://github.com/libratbag/libratbag/tree/master/data/devices)
+for the upstream list.
+
+## Build and run the modern GTK4 interface
+
+Clone this fork:
 
 ```sh
-git clone https://github.com/libratbag/piper.git
+git clone https://github.com/Pumacks/piper.git
 cd piper
-meson builddir --prefix=/usr/
 ```
 
-To build or re-build after code-changes and install, run:
+Configure and build it:
 
 ```sh
-ninja -C builddir
-sudo ninja -C builddir install
+meson setup builddir --prefix=/usr
+meson compile -C builddir
 ```
 
-Note: `builddir` is the build output directory and can be changed to any other
-directory name.
-
-See [our Wiki](https://github.com/libratbag/piper/wiki/Installation) for what
-to do when you encounter missing dependencies.
-
-Contributing
-============
-
-Yes please. It's best to contact us first to see what you could do. Note that
-the devices displayed by Piper come from libratbag.
-
-For quicker development iteration, there is a special binary `piper.devel`
-that uses data files from the git directory. This removes the need to
-install piper after every code change.
+Launch the modern interface directly from the source tree:
 
 ```sh
-ninja -C builddir
-./builddir/piper.devel
+./builddir/piper-better-ui.devel
 ```
-Note that this still requires ratbagd to run on the system bus.
 
-Piper tries to conform to Python's PEP8 style guide using the `black` formatter.
-Checking if code is formatted is done as a part of the test suite.
+`ratbagd` must be available on the system D-Bus. On most distributions it is
+D-Bus/systemd activated automatically after libratbag is installed.
 
-You can check if your code passes tests before submitting changes using the
-following command:
+After pulling new changes, rebuild with:
 
 ```sh
-meson test -C builddir
+meson compile -C builddir
 ```
 
-Source
-======
+If Meson asks for reconfiguration:
 
 ```sh
-git clone https://github.com/libratbag/piper.git
+meson setup --reconfigure builddir --prefix=/usr
 ```
 
-Bugs
-====
+## User-local compatibility installation
 
-Bugs can be reported in the issue tracker on our GitHub repo:
-https://github.com/libratbag/piper/issues
+The included helper rebuilds and installs this fork under `~/.local` without
+requiring `sudo`:
 
-License
-=======
+```sh
+./install-user.sh
+```
 
-Licensed under the GPLv2. See the
-[COPYING](https://github.com/libratbag/piper/blob/master/COPYING) file for the
-full license information.
+Close any running Piper window and reopen Piper from the application menu.
+
+> [!NOTE]
+> During the GTK4 migration, the installed desktop launcher uses the
+> compatibility interface. Use `./builddir/piper-better-ui.devel` for the
+> modern interface documented above.
+
+## Development
+
+Run all repository tests:
+
+```sh
+meson test -C builddir --print-errorlogs
+```
+
+Run the focused format and lint checks:
+
+```sh
+ninja -C builddir python-black-check
+ninja -C builddir python-ruff-check
+```
+
+Useful project locations:
+
+- `piper/better_ui.py` — GTK4/libadwaita application;
+- `piper/ratbagd.py` — D-Bus device model;
+- `piper/virtualprofiles.py` — virtual-profile storage and validation;
+- `piper/profilenames.py` — persistent local profile names;
+- `data/svgs/` — model-specific device illustrations and button regions; and
+- `tests/` — device-independent regression and repository checks.
+
+## Troubleshooting
+
+### No supported mouse found
+
+- Confirm that the device is supported by libratbag.
+- Make sure `ratbagd` is installed and available on the system bus.
+- Avoid running another Piper instance that may already be using the device.
+
+Useful checks include:
+
+```sh
+ratbagd --version
+ratbagctl list
+```
+
+### The mouse illustration is missing
+
+The device can still be configured, but hover highlighting requires a matching
+SVG. Device images live in `data/svgs/` and are selected through
+`data/svgs/svg-lookup.ini`.
+
+### A setting is unavailable
+
+Capabilities come from the mouse's libratbag driver. Firmware revisions and
+connection modes can expose different functionality.
+
+### Changes disappeared
+
+Remember to press **Apply**. Loading a virtual profile only stages its snapshot
+in the selected onboard slot.
+
+## Upstream and contributing
+
+This project builds on the work of the
+[Piper](https://github.com/libratbag/piper) and
+[libratbag](https://github.com/libratbag/libratbag) contributors.
+
+When reporting a problem, include:
+
+- the mouse model and connection type;
+- the output of `ratbagd --version`;
+- the Piper terminal output;
+- steps to reproduce the problem; and
+- a screenshot for visual or layout issues.
+
+Changes should follow the repository style and include regression tests where
+possible.
+
+## License
+
+Piper is licensed under the GNU General Public License v2.0 or later. See
+[COPYING](COPYING) for the complete license text.
