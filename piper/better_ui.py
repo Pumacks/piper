@@ -9,7 +9,7 @@ first while individual configuration pages are ported incrementally.
 
 from gettext import gettext as _
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Optional
 
 import cairo
 import gi
@@ -290,7 +290,6 @@ class BetterUiApplication(Adw.Application):
         self._toast_overlay: Optional[Adw.ToastOverlay] = None
         self._apply_button: Optional[Gtk.Button] = None
         self._profile_button: Optional[Gtk.MenuButton] = None
-        self._device_popover: Optional[Gtk.Popover] = None
         self._selected_device: Optional[RatbagdDevice] = None
         self._selected_profile: Optional[RatbagdProfile] = None
         self._draft = {}
@@ -298,8 +297,6 @@ class BetterUiApplication(Adw.Application):
             Path(GLib.get_user_config_dir()) / "piper" / "virtual_profiles.json"
         )
         self._profile_names = ProfileNameStore()
-        self._device_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.SINGLE)
-        self._device_rows: Dict[str, Gtk.ListBoxRow] = {}
         self._content_page = Adw.NavigationPage.new(
             self._status_page(
                 _("Connect a supported mouse"),
@@ -331,28 +328,8 @@ class BetterUiApplication(Adw.Application):
         self._apply_button.set_sensitive(False)
         self._apply_button.connect("clicked", self._on_apply_clicked)
         header_bar.pack_end(self._apply_button)
-        options_button = Gtk.MenuButton()
-        options_button.set_icon_name("open-menu-symbolic")
-        options_button.set_tooltip_text(_("Options and devices"))
-        self._device_popover = Gtk.Popover()
-        device_menu = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        device_menu.set_margin_top(8)
-        device_menu.set_margin_bottom(8)
-        device_menu.set_margin_start(8)
-        device_menu.set_margin_end(8)
-        device_heading = Gtk.Label(label=_("Devices"), xalign=0)
-        device_heading.add_css_class("heading")
-        device_menu.append(device_heading)
-        devices = Gtk.ScrolledWindow(min_content_width=260, max_content_height=360)
-        devices.set_propagate_natural_height(True)
-        devices.set_child(self._device_list)
-        device_menu.append(devices)
-        self._device_popover.set_child(device_menu)
-        options_button.set_popover(self._device_popover)
-        header_bar.pack_end(options_button)
         toolbar_view.add_top_bar(header_bar)
 
-        self._device_list.connect("row-selected", self._on_device_selected)
         self._toast_overlay = Adw.ToastOverlay()
         self._toast_overlay.set_child(self._content_page)
         toolbar_view.set_content(self._toast_overlay)
@@ -381,12 +358,6 @@ class BetterUiApplication(Adw.Application):
         self._refresh_devices()
 
     def _refresh_devices(self) -> None:
-        self._device_rows.clear()
-        row = self._device_list.get_first_child()
-        while row is not None:
-            self._device_list.remove(row)
-            row = self._device_list.get_first_child()
-
         if self._ratbag is None or not self._ratbag.devices:
             if self._profile_button is not None:
                 self._profile_button.set_visible(False)
@@ -398,40 +369,12 @@ class BetterUiApplication(Adw.Application):
             )
             return
 
-        for device in self._ratbag.devices:
-            row = self._make_device_row(device)
-            self._device_rows[device.id] = row
-            self._device_list.append(row)
-
-        first_row = self._device_list.get_first_child()
-        assert isinstance(first_row, Gtk.ListBoxRow)
-        self._device_list.select_row(first_row)
-
-    def _make_device_row(self, device: RatbagdDevice) -> Gtk.ListBoxRow:
-        row = Gtk.ListBoxRow()
-        row.device = device  # type: ignore[attr-defined]
-        label = Gtk.Label(
-            label=device.name,
-            xalign=0,
-            margin_top=12,
-            margin_bottom=12,
-            margin_start=12,
-            margin_end=12,
-        )
-        row.set_child(label)
-        return row
-
-    def _on_device_selected(
-        self, _listbox: Gtk.ListBox, row: Optional[Gtk.ListBoxRow]
-    ) -> None:
-        if row is None:
-            return
-        device = row.device  # type: ignore[attr-defined]
+        device = self._selected_device
+        if device not in self._ratbag.devices:
+            device = self._ratbag.devices[0]
         self._selected_device = device
         self._selected_profile = device.active_profile or device.profiles[0]
         self._draft = self._make_draft(self._selected_profile)
-        if self._device_popover is not None:
-            self._device_popover.popdown()
         self._show_device(device)
 
     def _device_page(self, device: RatbagdDevice) -> Gtk.Paned:
@@ -474,17 +417,15 @@ class BetterUiApplication(Adw.Application):
         preferences.set_title(_("Device settings"))
         preferences.set_vexpand(True)
         assert self._selected_profile is not None
-        if self._selected_profile.resolutions:
-            preferences.add(self._resolution_group())
         if self._selected_profile.buttons:
             preferences.add(self._buttons_group(mouse_preview))
+        if self._selected_profile.resolutions:
+            preferences.add(self._resolution_group())
         if self._selected_profile.leds:
             preferences.add(self._leds_group())
         advanced = self._advanced_group()
         if advanced is not None:
             preferences.add(advanced)
-        preferences.add(self._virtual_profiles_group(device))
-
         page.set_end_child(preferences)
         page.set_resize_end_child(True)
         page.set_shrink_end_child(False)
@@ -572,8 +513,18 @@ class BetterUiApplication(Adw.Application):
         heading = Gtk.Label(label=_("Choose a virtual profile"), xalign=0)
         heading.add_css_class("heading")
         content.append(heading)
-        search = Gtk.SearchEntry(placeholder_text=_("Search virtual profiles"))
-        content.append(search)
+        search_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        search = Gtk.SearchEntry(
+            placeholder_text=_("Search virtual profiles"), hexpand=True
+        )
+        search_row.append(search)
+        create = Gtk.Button.new_from_icon_name("list-add-symbolic")
+        create.set_tooltip_text(_("Create virtual profile from this slot"))
+        create.connect(
+            "clicked", self._on_create_virtual_profile_clicked, device, profile
+        )
+        search_row.append(create)
+        content.append(search_row)
         choices = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
         choices.add_css_class("boxed-list")
         choices.set_filter_func(
@@ -599,23 +550,32 @@ class BetterUiApplication(Adw.Application):
             choice = Gtk.ListBoxRow()
             choice.virtual_name = name  # type: ignore[attr-defined]
             choice.virtual_profile = virtual_profile  # type: ignore[attr-defined]
-            choice.set_child(
-                Gtk.Label(
-                    label=name,
-                    xalign=0,
-                    margin_top=8,
-                    margin_bottom=8,
-                    margin_start=8,
-                    margin_end=8,
-                )
+            choice_content = Gtk.Box(
+                orientation=Gtk.Orientation.HORIZONTAL,
+                spacing=6,
+                margin_top=4,
+                margin_bottom=4,
+                margin_start=8,
+                margin_end=4,
             )
+            choice_content.append(Gtk.Label(label=name, xalign=0, hexpand=True))
+            delete = Gtk.Button.new_from_icon_name("user-trash-symbolic")
+            delete.add_css_class("flat")
+            delete.set_tooltip_text(_("Delete virtual profile"))
+            delete.connect(
+                "clicked",
+                self._on_confirm_delete_virtual_profile_clicked,
+                device,
+                virtual_profile,
+            )
+            choice_content.append(delete)
+            choice.set_child(choice_content)
             choices.append(choice)
             choice_count += 1
         if choice_count == 0:
             empty = Gtk.Label(label=_("No virtual profiles saved"))
             empty.add_css_class("dim-label")
             content.append(empty)
-            button.set_sensitive(False)
         else:
             scroller = Gtk.ScrolledWindow(
                 min_content_width=300, max_content_height=320
@@ -652,6 +612,11 @@ class BetterUiApplication(Adw.Application):
                 row.connect(
                     "notify::selected", self._on_button_action_changed, button, actions
                 )
+                if button.action_type == RatbagdButton.ActionType.MACRO:
+                    macro_text = str(button.macro)
+                    row.set_subtitle(_("Macro: {}").format(macro_text))
+                    row.set_subtitle_lines(2)
+                    row.set_tooltip_text(macro_text)
             else:
                 row = Adw.ActionRow(
                     title=self._button_title(button.index),
@@ -709,7 +674,7 @@ class BetterUiApplication(Adw.Application):
                 (
                     RatbagdButton.ActionType.MACRO,
                     button.macro,
-                    _("Current macro: {}").format(button.macro),
+                    _("Macro"),
                 )
             )
         if RatbagdButton.ActionType.KEY in button.action_types:
@@ -916,50 +881,6 @@ class BetterUiApplication(Adw.Application):
             group.add(angle_row)
         return group
 
-    def _virtual_profiles_group(self, device: RatbagdDevice) -> Adw.PreferencesGroup:
-        group = Adw.PreferencesGroup(
-            title=_("Virtual profiles"),
-            description=_("Stored locally; loading one replaces this onboard slot."),
-        )
-        save_row = Adw.EntryRow(title=_("Save current profile as"))
-        save_row.set_text(self._draft["name"])
-        save_button = Gtk.Button(label=_("Save"))
-        save_button.set_valign(Gtk.Align.CENTER)
-        save_button.connect("clicked", self._on_save_virtual_profile_clicked, save_row)
-        save_row.add_suffix(save_button)
-        group.add(save_row)
-
-        try:
-            virtual_profiles = self._virtual_profiles.list_for_model(device.model)
-        except VirtualProfileError as error:
-            group.add(
-                Adw.ActionRow(
-                    title=_("Could not read virtual profiles"), subtitle=str(error)
-                )
-            )
-            return group
-
-        for virtual_profile in virtual_profiles:
-            name = virtual_profile.get("name")
-            if not isinstance(name, str):
-                name = _("Invalid virtual profile")
-            row = Adw.ActionRow(title=name)
-            load_button = Gtk.Button(label=_("Load"))
-            load_button.set_valign(Gtk.Align.CENTER)
-            load_button.connect(
-                "clicked", self._on_load_virtual_profile_clicked, virtual_profile
-            )
-            delete_button = Gtk.Button.new_from_icon_name("user-trash-symbolic")
-            delete_button.set_valign(Gtk.Align.CENTER)
-            delete_button.set_tooltip_text(_("Delete virtual profile"))
-            delete_button.connect(
-                "clicked", self._on_delete_virtual_profile_clicked, virtual_profile
-            )
-            row.add_suffix(load_button)
-            row.add_suffix(delete_button)
-            group.add(row)
-        return group
-
     def _profile_display_name(self, device, profile) -> str:
         return (
             self._profile_names.get(device, profile)
@@ -1080,6 +1001,87 @@ class BetterUiApplication(Adw.Application):
         stack.set_visible_child_name("label")
         self._add_toast(_("Profile renamed"))
 
+    def _on_create_virtual_profile_clicked(self, _button, device, profile) -> None:
+        assert self._window is not None
+        dialog = Adw.MessageDialog(
+            transient_for=self._window,
+            heading=_("Create virtual profile"),
+            body=_("Save the current settings from this onboard slot."),
+        )
+        entry = Gtk.Entry(
+            text=self._profile_display_name(device, profile),
+            placeholder_text=_("Virtual profile name"),
+            activates_default=True,
+        )
+        entry.set_max_length(64)
+        dialog.set_extra_child(entry)
+        dialog.add_response("cancel", _("Cancel"))
+        dialog.add_response("create", _("Create"))
+        dialog.set_close_response("cancel")
+        dialog.set_default_response("create")
+        dialog.set_response_appearance("create", Adw.ResponseAppearance.SUGGESTED)
+        dialog.connect(
+            "response",
+            self._on_create_virtual_profile_response,
+            entry,
+            device,
+            profile,
+        )
+        dialog.present()
+
+    def _on_create_virtual_profile_response(
+        self, _dialog, response, entry, device, profile
+    ) -> None:
+        if response != "create":
+            return
+        name = entry.get_text().strip()
+        if not name:
+            self._add_toast(_("Enter a virtual profile name"))
+            return
+        try:
+            self._virtual_profiles.save(name, device.model, profile)
+        except VirtualProfileError as error:
+            self._add_toast(str(error))
+            return
+        self._add_toast(_("Virtual profile created"))
+        self._refresh_profile_menu(device)
+
+    def _on_confirm_delete_virtual_profile_clicked(
+        self, _button, device, virtual_profile
+    ) -> None:
+        assert self._window is not None
+        name = virtual_profile.get("name", _("this virtual profile"))
+        dialog = Adw.MessageDialog(
+            transient_for=self._window,
+            heading=_("Delete virtual profile?"),
+            body=_("‘{}’ will be permanently removed.").format(name),
+        )
+        dialog.add_response("cancel", _("Cancel"))
+        dialog.add_response("delete", _("Delete"))
+        dialog.set_close_response("cancel")
+        dialog.set_default_response("cancel")
+        dialog.set_response_appearance("delete", Adw.ResponseAppearance.DESTRUCTIVE)
+        dialog.connect(
+            "response",
+            self._on_delete_virtual_profile_response,
+            device,
+            virtual_profile,
+        )
+        dialog.present()
+
+    def _on_delete_virtual_profile_response(
+        self, _dialog, response, device, virtual_profile
+    ) -> None:
+        if response != "delete":
+            return
+        try:
+            self._virtual_profiles.delete(virtual_profile["id"])
+        except (KeyError, VirtualProfileError) as error:
+            self._add_toast(str(error))
+            return
+        self._add_toast(_("Virtual profile deleted"))
+        self._refresh_profile_menu(device)
+
     def _on_virtual_profile_choice_activated(
         self, _listbox, row, device, profile, popover
     ) -> None:
@@ -1156,6 +1158,9 @@ class BetterUiApplication(Adw.Application):
         except (GLib.Error, RatbagError, ValueError):
             self._add_toast(_("Could not change button assignment"))
             return
+        if action_type != RatbagdButton.ActionType.MACRO:
+            dropdown.set_subtitle("")
+            dropdown.set_tooltip_text(None)
         self._set_apply_sensitive(True)
 
     def _open_button_capture(self, button, capture_macro: bool) -> None:
@@ -1253,63 +1258,6 @@ class BetterUiApplication(Adw.Application):
     def _on_angle_snapping_changed(self, row, _pspec) -> None:
         self._draft["angle_snapping"] = 1 if row.get_active() else 0
         self._set_apply_sensitive(True)
-
-    def _on_save_virtual_profile_clicked(self, _button, row) -> None:
-        assert self._selected_device is not None
-        assert self._selected_profile is not None
-        name = row.get_text().strip()
-        if not name:
-            self._add_toast(_("Enter a virtual profile name"))
-            return
-        try:
-            self._virtual_profiles.save(
-                name, self._selected_device.model, self._selected_profile
-            )
-        except VirtualProfileError as error:
-            self._add_toast(str(error))
-            return
-        self._add_toast(_("Virtual profile saved"))
-        self._show_device(self._selected_device)
-
-    def _on_load_virtual_profile_clicked(self, _button, virtual_profile: dict) -> None:
-        assert self._selected_device is not None
-        assert self._selected_profile is not None
-        try:
-            virtual_name = virtual_profile["name"]
-            if not isinstance(virtual_name, str) or not virtual_name.strip():
-                raise VirtualProfileError("This virtual profile has an invalid name")
-            apply_snapshot(virtual_profile["settings"], self._selected_profile)
-            self._set_profile_name_from_virtual(
-                self._selected_device, self._selected_profile, virtual_name
-            )
-        except (
-            KeyError,
-            OSError,
-            TypeError,
-            ValueError,
-            VirtualProfileError,
-            GLib.Error,
-        ) as error:
-            self._add_toast(str(error))
-            return
-        self._draft = self._make_draft(self._selected_profile)
-        self._set_apply_sensitive(True)
-        self._add_toast(
-            _("Virtual profile loaded; press Apply to write it to the mouse")
-        )
-        self._show_device(self._selected_device)
-
-    def _on_delete_virtual_profile_clicked(
-        self, _button, virtual_profile: dict
-    ) -> None:
-        try:
-            self._virtual_profiles.delete(virtual_profile["id"])
-        except (KeyError, VirtualProfileError) as error:
-            self._add_toast(str(error))
-            return
-        assert self._selected_device is not None
-        self._add_toast(_("Virtual profile deleted"))
-        self._show_device(self._selected_device)
 
     def _show_device(self, device: RatbagdDevice) -> None:
         self._refresh_profile_menu(device)
