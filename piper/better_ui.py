@@ -11,22 +11,26 @@ from gettext import gettext as _
 from pathlib import Path
 from typing import Dict, Optional
 
+import cairo
 import gi
 
 gi.require_version("Adw", "1")
 gi.require_version("Gdk", "4.0")
 gi.require_version("Gtk", "4.0")
 gi.require_version("Rsvg", "2.0")
-from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Rsvg  # noqa
+from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango, Rsvg  # noqa
 
 from .ratbagd import (
     Ratbagd,
     RatbagdButton,
     RatbagdDevice,
     RatbagdIncompatibleError,
+    RatbagdLed,
+    RatbagdMacro,
     RatbagError,
     RatbagdProfile,
     RatbagdUnavailableError,
+    evcode_to_str,
 )
 from .svg import get_svg
 from .virtualprofiles import (
@@ -36,8 +40,243 @@ from .virtualprofiles import (
 )
 
 
+class MousePreview(Gtk.DrawingArea):
+    """Scalable mouse artwork with a model-specific highlighted control."""
+
+    def __init__(self, device: RatbagdDevice) -> None:
+        super().__init__()
+        self._handle: Optional[Rsvg.Handle] = None
+        self._highlight_element: Optional[str] = None
+        try:
+            svg_data = get_svg(device.model)
+            assert svg_data is not None
+            self._handle = Rsvg.Handle.new_from_data(svg_data)
+        except (FileNotFoundError, GLib.Error):
+            pass
+
+        self.set_content_width(360)
+        self.set_content_height(440)
+        self.set_hexpand(True)
+        self.set_vexpand(True)
+        self.set_draw_func(self._draw)
+
+    @property
+    def available(self) -> bool:
+        return self._handle is not None and self._handle.has_sub("#Device")
+
+    def highlight_button(self, button_index: Optional[int]) -> None:
+        element = None if button_index is None else f"#button{button_index}"
+        if self._handle is not None and element is not None:
+            if not self._handle.has_sub(element):
+                element = None
+        if element != self._highlight_element:
+            self._highlight_element = element
+            self.queue_draw()
+
+    def _draw(self, _area, cr: cairo.Context, width: int, height: int) -> None:
+        if not self.available:
+            return
+        assert self._handle is not None
+        svg_width = self._handle.props.width
+        svg_height = self._handle.props.height
+        scale = min(width / svg_width, height / svg_height) * 0.9
+        x = (width - svg_width * scale) / 2
+        y = (height - svg_height * scale) / 2
+
+        cr.save()
+        cr.translate(x, y)
+        cr.scale(scale, scale)
+        self._handle.render_cairo_sub(cr, id="#Device")
+        if self._highlight_element is not None:
+            surface = cr.get_target().create_similar(
+                cairo.CONTENT_COLOR_ALPHA, svg_width, svg_height
+            )
+            mask = cairo.Context(surface)
+            self._handle.render_cairo_sub(mask, id=self._highlight_element)
+            found, accent = self.get_style_context().lookup_color("accent_color")
+            if found:
+                cr.set_source_rgba(accent.red, accent.green, accent.blue, 0.72)
+            else:
+                cr.set_source_rgba(0.21, 0.52, 0.89, 0.72)
+            cr.mask_surface(surface, 0, 0)
+        cr.restore()
+
+
+class ButtonCaptureDialog(Adw.Window):
+    """Capture one keyboard key or an ordered key press/release macro."""
+
+    _XORG_KEYCODE_OFFSET = 8
+    _MAX_MACRO_EVENTS = 128
+
+    def __init__(self, parent, capture_macro: bool, on_saved, on_cancelled) -> None:
+        super().__init__(transient_for=parent, modal=True)
+        self._capture_macro = capture_macro
+        self._on_saved = on_saved
+        self._on_cancelled = on_cancelled
+        self._saved = False
+        self._key: Optional[int] = None
+        self._events = []
+        self._pressed_keys = set()
+        self._last_event_time: Optional[int] = None
+
+        title = _("Record a macro") if capture_macro else _("Assign a keyboard key")
+        self.set_title(title)
+        self.set_default_size(520, 340)
+
+        toolbar = Adw.ToolbarView()
+        header = Adw.HeaderBar()
+        cancel = Gtk.Button(label=_("Cancel"))
+        cancel.connect("clicked", lambda _button: self.close())
+        header.pack_start(cancel)
+        self._save_button = Gtk.Button(label=_("Use assignment"))
+        self._save_button.add_css_class("suggested-action")
+        self._save_button.set_sensitive(False)
+        self._save_button.connect("clicked", self._on_save_clicked)
+        header.pack_end(self._save_button)
+        toolbar.add_top_bar(header)
+
+        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
+        content.set_margin_top(30)
+        content.set_margin_bottom(30)
+        content.set_margin_start(30)
+        content.set_margin_end(30)
+        instruction = Gtk.Label(
+            label=(
+                _("Type the key sequence, then click Use assignment.")
+                if capture_macro
+                else _("Press the keyboard key you want to assign.")
+            ),
+            wrap=True,
+        )
+        instruction.add_css_class("title-3")
+        content.append(instruction)
+
+        preview_frame = Gtk.Frame()
+        self._preview = Gtk.Label(
+            label=_("Waiting for keyboard input…"),
+            wrap=True,
+            selectable=True,
+            margin_top=24,
+            margin_bottom=24,
+            margin_start=18,
+            margin_end=18,
+        )
+        preview_frame.set_child(self._preview)
+        content.append(preview_frame)
+
+        clear = Gtk.Button(label=_("Clear recording"), halign=Gtk.Align.CENTER)
+        clear.connect("clicked", self._on_clear_clicked)
+        content.append(clear)
+        toolbar.set_content(content)
+        self.set_content(toolbar)
+
+        keys = Gtk.EventControllerKey()
+        keys.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+        keys.connect("key-pressed", self._on_key_pressed)
+        keys.connect("key-released", self._on_key_released)
+        self.add_controller(keys)
+        self.connect("close-request", self._on_close_request)
+
+    @classmethod
+    def _evdev_keycode(cls, hardware_keycode: int) -> Optional[int]:
+        if not cls._XORG_KEYCODE_OFFSET <= hardware_keycode <= 255:
+            return None
+        keycode = hardware_keycode - cls._XORG_KEYCODE_OFFSET
+        try:
+            evcode_to_str(keycode)
+        except KeyError:
+            return None
+        return keycode
+
+    def _on_key_pressed(self, _controller, _keyval, keycode, _state) -> bool:
+        key = self._evdev_keycode(keycode)
+        if key is None:
+            self._preview.set_label(_("That key cannot be stored by this device."))
+            return True
+        if key in self._pressed_keys:
+            return True
+        self._pressed_keys.add(key)
+
+        if self._capture_macro:
+            self._append_macro_event(RatbagdButton.Macro.KEY_PRESS, key)
+        elif self._key is None:
+            self._key = key
+        self._update_preview()
+        return True
+
+    def _on_key_released(self, _controller, _keyval, keycode, _state) -> None:
+        key = self._evdev_keycode(keycode)
+        if key is None:
+            return
+        self._pressed_keys.discard(key)
+        if self._capture_macro:
+            self._append_macro_event(RatbagdButton.Macro.KEY_RELEASE, key)
+            self._update_preview()
+
+    def _append_macro_event(self, event_type, key: int) -> None:
+        if len(self._events) >= self._MAX_MACRO_EVENTS:
+            self._preview.set_label(_("The maximum macro length has been reached."))
+            return
+
+        now = GLib.get_monotonic_time()
+        if self._last_event_time is not None:
+            delay = min(round((now - self._last_event_time) / 1000), 60000)
+            if delay >= 10 and len(self._events) < self._MAX_MACRO_EVENTS - 1:
+                self._events.append((RatbagdButton.Macro.WAIT, delay))
+        self._events.append((event_type, key))
+        self._last_event_time = now
+
+    def _update_preview(self) -> None:
+        if self._capture_macro:
+            if not self._events:
+                text = _("Waiting for keyboard input…")
+            else:
+                text = str(RatbagdMacro.from_ratbag(self._events))
+            self._save_button.set_sensitive(bool(self._events))
+        else:
+            if self._key is None:
+                text = _("Waiting for keyboard input…")
+            else:
+                macro = RatbagdMacro()
+                macro.append(RatbagdButton.Macro.KEY_PRESS, self._key)
+                macro.append(RatbagdButton.Macro.KEY_RELEASE, self._key)
+                text = str(macro)
+            self._save_button.set_sensitive(self._key is not None)
+        self._preview.set_label(text)
+
+    def _on_clear_clicked(self, _button) -> None:
+        self._key = None
+        self._events.clear()
+        self._pressed_keys.clear()
+        self._last_event_time = None
+        self._update_preview()
+
+    def _on_save_clicked(self, _button) -> None:
+        if self._capture_macro:
+            if not self._events:
+                return
+            value = RatbagdMacro.from_ratbag(self._events)
+            action_type = RatbagdButton.ActionType.MACRO
+        else:
+            if self._key is None:
+                return
+            value = self._key
+            action_type = RatbagdButton.ActionType.KEY
+        self._saved = True
+        self.close()
+        self._on_saved(action_type, value)
+
+    def _on_close_request(self, _window) -> bool:
+        if not self._saved:
+            self._on_cancelled()
+        return False
+
+
 class BetterUiApplication(Adw.Application):
     """An experimental GTK 4/libadwaita shell backed by ratbagd."""
+
+    _CAPTURE_KEY = object()
+    _CAPTURE_MACRO = object()
 
     def __init__(self, ratbagd_api_version: int) -> None:
         super().__init__(
@@ -173,27 +412,45 @@ class BetterUiApplication(Adw.Application):
         self._draft = self._make_draft(self._selected_profile)
         self._show_device(device)
 
-    def _device_page(self, device: RatbagdDevice) -> Gtk.Box:
-        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
-        page.set_margin_top(12)
-        page.set_margin_bottom(12)
-        page.set_margin_start(18)
-        page.set_margin_end(18)
+    def _device_page(self, device: RatbagdDevice) -> Gtk.Paned:
+        page = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL, wide_handle=True)
+        page.set_position(390)
 
-        stack = Gtk.Stack(
-            vexpand=True, transition_type=Gtk.StackTransitionType.CROSSFADE
-        )
-        switcher = Gtk.StackSwitcher(stack=stack, halign=Gtk.Align.CENTER)
-        page.append(switcher)
-        page.append(stack)
+        preview_panel = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        preview_panel.set_margin_top(24)
+        preview_panel.set_margin_bottom(24)
+        preview_panel.set_margin_start(24)
+        preview_panel.set_margin_end(24)
+        device_name = Gtk.Label(label=device.name, xalign=0)
+        device_name.add_css_class("title-2")
+        device_model = Gtk.Label(label=device.model, xalign=0)
+        device_model.add_css_class("dim-label")
+        device_model.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+        preview_panel.append(device_name)
+        preview_panel.append(device_model)
 
-        profiles_page = Adw.PreferencesPage()
-        profiles_page.set_title(_("Profiles"))
-        profiles_page.set_icon_name("avatar-default-symbolic")
+        mouse_preview = MousePreview(device)
+        if mouse_preview.available:
+            preview_panel.append(mouse_preview)
+            hint = Gtk.Label(
+                label=_("Hover a button setting to locate it on the mouse."),
+                wrap=True,
+            )
+            hint.add_css_class("dim-label")
+            preview_panel.append(hint)
+        else:
+            preview_panel.append(
+                self._status_page(
+                    _("Mouse illustration unavailable"),
+                    _("Button assignments can still be edited on the right."),
+                )
+            )
+        page.set_start_child(preview_panel)
+        page.set_resize_start_child(False)
 
-        details = Adw.PreferencesGroup(title=_("Device"))
-        details.add(Adw.ActionRow(title=device.name, subtitle=device.model))
-        profiles_page.add(details)
+        preferences = Adw.PreferencesPage()
+        preferences.set_title(_("Device settings"))
+        preferences.set_vexpand(True)
 
         profiles = Adw.PreferencesGroup(title=_("Onboard profiles"))
         selector = Adw.ComboRow(title=_("Editing profile"))
@@ -216,6 +473,17 @@ class BetterUiApplication(Adw.Application):
             name_row.connect("notify::text", self._on_profile_name_changed)
             profiles.add(name_row)
 
+        if RatbagdProfile.CAP_DISABLE in self._selected_profile.capabilities:
+            enabled_row = Adw.SwitchRow(title=_("Profile enabled"))
+            enabled_row.set_active(not self._selected_profile.disabled)
+            enabled_row.set_sensitive(not self._selected_profile.is_active)
+            enabled_row.connect(
+                "notify::active",
+                self._on_profile_enabled_changed,
+                self._selected_profile,
+            )
+            profiles.add(enabled_row)
+
         for profile in device.profiles:
             name = profile.name or _("Profile {}").format(profile.index + 1)
             subtitle = _("Disabled") if profile.disabled else _("Available")
@@ -232,89 +500,116 @@ class BetterUiApplication(Adw.Application):
             )
             row.add_suffix(activate_button)
             profiles.add(row)
-        profiles_page.add(profiles)
-        profiles_page.add(self._virtual_profiles_group(device))
-        stack.add_titled(profiles_page, "profiles", _("Profiles"))
-
-        sensitivity_page = Adw.PreferencesPage()
-        sensitivity_page.set_title(_("Sensitivity"))
-        sensitivity_page.set_icon_name("preferences-system-symbolic")
-        sensitivity_page.add(self._resolution_group())
+        preferences.add(profiles)
+        if self._selected_profile.resolutions:
+            preferences.add(self._resolution_group())
+        if self._selected_profile.buttons:
+            preferences.add(self._buttons_group(mouse_preview))
+        if self._selected_profile.leds:
+            preferences.add(self._leds_group())
         advanced = self._advanced_group()
         if advanced is not None:
-            sensitivity_page.add(advanced)
-        stack.add_titled(sensitivity_page, "sensitivity", _("Sensitivity"))
+            preferences.add(advanced)
+        preferences.add(self._virtual_profiles_group(device))
 
-        buttons_page = self._buttons_page(device)
-        stack.add_titled(buttons_page, "buttons", _("Buttons"))
+        page.set_end_child(preferences)
+        page.set_resize_end_child(True)
+        page.set_shrink_end_child(False)
         return page
 
-    def _buttons_page(self, device: RatbagdDevice) -> Gtk.Box:
+    def _buttons_group(self, preview: MousePreview) -> Adw.PreferencesGroup:
         assert self._selected_profile is not None
-        page = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=24)
-        page.set_homogeneous(True)
-        page.set_margin_top(12)
-
-        picture = self._mouse_picture(device)
-        picture.set_hexpand(True)
-        picture.set_vexpand(True)
-        page.append(picture)
-
-        controls = Gtk.Grid(
-            column_spacing=12,
-            row_spacing=10,
-            margin_top=12,
-            margin_bottom=12,
+        group = Adw.PreferencesGroup(
+            title=_("Button assignments"),
+            description=_(
+                "Point at a row to highlight the matching physical button."
+            ),
         )
-        controls.set_hexpand(True)
-        heading = Gtk.Label(label=_("Button assignments"), xalign=0)
-        heading.add_css_class("title-3")
-        controls.attach(heading, 0, 0, 2, 1)
-        for row_index, button in enumerate(self._selected_profile.buttons, start=1):
-            label = Gtk.Label(
-                label=_("Button {}").format(button.index + 1), xalign=0
-            )
+        for button in self._selected_profile.buttons:
             actions = self._button_actions(button)
             if actions:
-                dropdown = Gtk.DropDown.new_from_strings(
-                    [action[2] for action in actions]
-                )
-                dropdown.set_hexpand(True)
-                dropdown.set_selected(self._selected_button_action(button, actions))
-                dropdown.connect(
+                row = Adw.ComboRow(title=self._button_title(button.index))
+                row.set_model(Gtk.StringList.new([action[2] for action in actions]))
+                row.set_selected(self._selected_button_action(button, actions))
+                row.connect(
                     "notify::selected", self._on_button_action_changed, button, actions
                 )
             else:
-                dropdown = Gtk.Label(label=_("Not configurable"), xalign=0)
-            controls.attach(label, 0, row_index, 1, 1)
-            controls.attach(dropdown, 1, row_index, 1, 1)
-        page.append(controls)
-        return page
+                row = Adw.ActionRow(
+                    title=self._button_title(button.index),
+                    subtitle=_("Not configurable"),
+                )
+            motion = Gtk.EventControllerMotion()
+            motion.connect(
+                "enter", self._on_button_hover_enter, button.index, preview
+            )
+            motion.connect("leave", self._on_button_hover_leave, preview)
+            row.add_controller(motion)
+            focus = Gtk.EventControllerFocus()
+            focus.connect("enter", self._on_button_focus_enter, button.index, preview)
+            focus.connect("leave", self._on_button_focus_leave, preview)
+            row.add_controller(focus)
+            group.add(row)
+        return group
 
     @staticmethod
-    def _mouse_picture(device: RatbagdDevice) -> Gtk.Widget:
-        try:
-            svg_data = get_svg(device.model)
-            assert svg_data is not None
-            handle = Rsvg.Handle.new_from_data(svg_data)
-            assert handle is not None
-            pixbuf = handle.get_pixbuf_sub("#Device")
-            if pixbuf is None:
-                raise ValueError("Mouse SVG does not contain a device image")
-            texture = Gdk.Texture.new_for_pixbuf(pixbuf)
-        except (FileNotFoundError, GLib.Error, ValueError):
-            return Adw.StatusPage(
-                icon_name="input-mouse-symbolic",
-                title=_("Mouse illustration unavailable"),
-            )
-        picture = Gtk.Picture.new_for_paintable(texture)
-        picture.set_content_fit(Gtk.ContentFit.CONTAIN)
-        picture.set_size_request(420, 480)
-        return picture
+    def _button_title(index: int) -> str:
+        description = RatbagdButton.BUTTON_DESCRIPTION.get(index)
+        if description is not None:
+            return _(description)
+        return _("Button {}").format(index + 1)
+
+    @staticmethod
+    def _on_button_hover_enter(_motion, _x, _y, index, preview) -> None:
+        preview.highlight_button(index)
+
+    @staticmethod
+    def _on_button_hover_leave(_motion, preview) -> None:
+        preview.highlight_button(None)
+
+    @staticmethod
+    def _on_button_focus_enter(_focus, index, preview) -> None:
+        preview.highlight_button(index)
+
+    @staticmethod
+    def _on_button_focus_leave(_focus, preview) -> None:
+        preview.highlight_button(None)
 
     @staticmethod
     def _button_actions(button: RatbagdButton) -> list:
         actions = []
+        if button.action_type == RatbagdButton.ActionType.KEY:
+            actions.append(
+                (
+                    RatbagdButton.ActionType.KEY,
+                    button.key,
+                    _("Keyboard key: {}").format(evcode_to_str(button.key)),
+                )
+            )
+        elif button.action_type == RatbagdButton.ActionType.MACRO:
+            actions.append(
+                (
+                    RatbagdButton.ActionType.MACRO,
+                    button.macro,
+                    _("Current macro: {}").format(button.macro),
+                )
+            )
+        if RatbagdButton.ActionType.KEY in button.action_types:
+            actions.append(
+                (
+                    RatbagdButton.ActionType.KEY,
+                    BetterUiApplication._CAPTURE_KEY,
+                    _("Assign a keyboard key…"),
+                )
+            )
+        if RatbagdButton.ActionType.MACRO in button.action_types:
+            actions.append(
+                (
+                    RatbagdButton.ActionType.MACRO,
+                    BetterUiApplication._CAPTURE_MACRO,
+                    _("Record a macro…"),
+                )
+            )
         if RatbagdButton.ActionType.BUTTON in button.action_types:
             actions.extend(
                 (
@@ -345,6 +640,10 @@ class BetterUiApplication(Adw.Application):
             value = button.mapping
         elif button.action_type == RatbagdButton.ActionType.SPECIAL:
             value = button.special
+        elif button.action_type == RatbagdButton.ActionType.KEY:
+            value = button.key
+        elif button.action_type == RatbagdButton.ActionType.MACRO:
+            value = button.macro
         for index, (action_type, action_value, _label) in enumerate(actions):
             if action_type == button.action_type and action_value == value:
                 return index
@@ -378,7 +677,87 @@ class BetterUiApplication(Adw.Application):
             active_button.set_sensitive(index != active_index)
             active_button.connect("clicked", self._on_active_dpi_clicked, index)
             dpi_row.add_suffix(active_button)
+            if (
+                resolution.CAP_DISABLE in resolution.capabilities
+                and not resolution.is_active
+            ):
+                enabled = Gtk.Switch(valign=Gtk.Align.CENTER)
+                enabled.set_active(not resolution.is_disabled)
+                enabled.connect(
+                    "notify::active", self._on_resolution_enabled_changed, resolution
+                )
+                dpi_row.add_suffix(enabled)
             group.add(dpi_row)
+        return group
+
+    def _leds_group(self) -> Adw.PreferencesGroup:
+        assert self._selected_profile is not None
+        group = Adw.PreferencesGroup(
+            title=_("Lighting"),
+            description=_("Configure each lighting zone without leaving this page."),
+        )
+        for index, led in enumerate(self._selected_profile.leds):
+            led_draft = self._draft["leds"][index]
+            expander = Adw.ExpanderRow(title=_("Lighting zone {}").format(index + 1))
+
+            modes = list(led.modes)
+            mode_row = Adw.ComboRow(title=_("Effect"))
+            mode_row.set_model(
+                Gtk.StringList.new(
+                    [_(RatbagdLed.LED_DESCRIPTION[mode]) for mode in modes]
+                )
+            )
+            mode_row.set_selected(modes.index(led_draft["mode"]))
+            expander.add_row(mode_row)
+
+            color_row = Adw.ActionRow(title=_("Color"))
+            color_button = Gtk.ColorDialogButton.new(Gtk.ColorDialog.new())
+            red, green, blue = led_draft["color"]
+            color_button.set_rgba(
+                Gdk.RGBA(red / 255.0, green / 255.0, blue / 255.0, 1.0)
+            )
+            color_button.set_valign(Gtk.Align.CENTER)
+            color_button.connect("notify::rgba", self._on_led_color_changed, index)
+            color_row.add_suffix(color_button)
+            expander.add_row(color_row)
+
+            brightness_row = Adw.ActionRow(title=_("Brightness"))
+            brightness = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 255, 1)
+            brightness.set_value(led_draft["brightness"])
+            brightness.set_size_request(180, -1)
+            brightness.set_valign(Gtk.Align.CENTER)
+            brightness.set_draw_value(True)
+            brightness.connect("value-changed", self._on_led_brightness_changed, index)
+            brightness_row.add_suffix(brightness)
+            expander.add_row(brightness_row)
+
+            duration_row = Adw.ActionRow(
+                title=_("Effect speed"),
+                subtitle=_("Lower values animate faster"),
+            )
+            duration = Gtk.Scale.new_with_range(
+                Gtk.Orientation.HORIZONTAL, 0, 10000, 100
+            )
+            duration.set_value(led_draft["effect_duration"])
+            duration.set_size_request(180, -1)
+            duration.set_valign(Gtk.Align.CENTER)
+            duration.set_draw_value(True)
+            duration.connect("value-changed", self._on_led_duration_changed, index)
+            duration_row.add_suffix(duration)
+            expander.add_row(duration_row)
+            mode_row.connect(
+                "notify::selected",
+                self._on_led_mode_changed,
+                index,
+                modes,
+                color_row,
+                brightness_row,
+                duration_row,
+            )
+            self._update_led_controls(
+                led_draft["mode"], color_row, brightness_row, duration_row
+            )
+            group.add(expander)
         return group
 
     def _advanced_group(self) -> Optional[Adw.PreferencesGroup]:
@@ -479,6 +858,15 @@ class BetterUiApplication(Adw.Application):
             "report_rate": profile.report_rate,
             "debounce": profile.debounce,
             "angle_snapping": profile.angle_snapping,
+            "leds": [
+                {
+                    "mode": led.mode,
+                    "color": tuple(led.color),
+                    "brightness": led.brightness,
+                    "effect_duration": led.effect_duration,
+                }
+                for led in profile.leds
+            ],
         }
 
     def _on_devices_changed(self, *_args) -> None:
@@ -497,6 +885,14 @@ class BetterUiApplication(Adw.Application):
         self._draft["name"] = row.get_text()
         self._set_apply_sensitive(True)
 
+    def _on_profile_enabled_changed(self, row, _pspec, profile) -> None:
+        try:
+            profile.disabled = not row.get_active()
+        except (GLib.Error, RatbagError, ValueError):
+            self._add_toast(_("Could not change profile availability"))
+            return
+        self._set_apply_sensitive(True)
+
     def _on_dpi_changed(self, row, _pspec, index: int, dpi_values: list) -> None:
         selected = row.get_selected()
         if selected == Gtk.INVALID_LIST_POSITION:
@@ -504,21 +900,110 @@ class BetterUiApplication(Adw.Application):
         self._draft["resolutions"][index] = dpi_values[selected]
         self._set_apply_sensitive(True)
 
+    def _on_resolution_enabled_changed(self, switch, _pspec, resolution) -> None:
+        try:
+            resolution.set_disabled(not switch.get_active())
+        except (GLib.Error, RatbagError, ValueError):
+            self._add_toast(_("Could not change DPI stage availability"))
+            return
+        self._set_apply_sensitive(True)
+
     def _on_button_action_changed(self, dropdown, _pspec, button, actions) -> None:
         selected = dropdown.get_selected()
         if selected == Gtk.INVALID_LIST_POSITION:
             return
         action_type, value, _label = actions[selected]
+        if value in (self._CAPTURE_KEY, self._CAPTURE_MACRO):
+            self._open_button_capture(button, value is self._CAPTURE_MACRO)
+            return
         try:
             if action_type == RatbagdButton.ActionType.BUTTON:
                 button.mapping = value
             elif action_type == RatbagdButton.ActionType.SPECIAL:
                 button.special = value
+            elif action_type == RatbagdButton.ActionType.KEY:
+                button.key = value
+            elif action_type == RatbagdButton.ActionType.MACRO:
+                button.macro = value
             elif action_type == RatbagdButton.ActionType.NONE:
                 button.disable()
         except (GLib.Error, RatbagError, ValueError):
             self._add_toast(_("Could not change button assignment"))
             return
+        self._set_apply_sensitive(True)
+
+    def _open_button_capture(self, button, capture_macro: bool) -> None:
+        assert self._window is not None
+        dialog = ButtonCaptureDialog(
+            self._window,
+            capture_macro,
+            lambda action_type, value: self._on_button_capture_saved(
+                button, action_type, value
+            ),
+            self._refresh_selected_device,
+        )
+        dialog.present()
+
+    def _on_button_capture_saved(self, button, action_type, value) -> None:
+        try:
+            if action_type == RatbagdButton.ActionType.KEY:
+                button.key = value
+            else:
+                button.macro = value
+        except (GLib.Error, RatbagError, ValueError):
+            self._add_toast(_("Could not change button assignment"))
+            self._refresh_selected_device()
+            return
+        self._set_apply_sensitive(True)
+        self._refresh_selected_device()
+
+    def _refresh_selected_device(self) -> None:
+        if self._selected_device is not None:
+            self._show_device(self._selected_device)
+
+    def _on_led_mode_changed(
+        self,
+        row,
+        _pspec,
+        index: int,
+        modes: list,
+        color_row,
+        brightness_row,
+        duration_row,
+    ) -> None:
+        selected = row.get_selected()
+        if selected == Gtk.INVALID_LIST_POSITION:
+            return
+        mode = modes[selected]
+        self._draft["leds"][index]["mode"] = mode
+        self._update_led_controls(mode, color_row, brightness_row, duration_row)
+        self._set_apply_sensitive(True)
+
+    @staticmethod
+    def _update_led_controls(mode, color_row, brightness_row, duration_row) -> None:
+        color_row.set_sensitive(
+            mode in (RatbagdLed.Mode.ON, RatbagdLed.Mode.BREATHING)
+        )
+        brightness_row.set_sensitive(mode != RatbagdLed.Mode.OFF)
+        duration_row.set_sensitive(
+            mode in (RatbagdLed.Mode.CYCLE, RatbagdLed.Mode.BREATHING)
+        )
+
+    def _on_led_color_changed(self, button, _pspec, index: int) -> None:
+        color = button.get_rgba()
+        self._draft["leds"][index]["color"] = (
+            round(color.red * 255),
+            round(color.green * 255),
+            round(color.blue * 255),
+        )
+        self._set_apply_sensitive(True)
+
+    def _on_led_brightness_changed(self, scale, index: int) -> None:
+        self._draft["leds"][index]["brightness"] = round(scale.get_value())
+        self._set_apply_sensitive(True)
+
+    def _on_led_duration_changed(self, scale, index: int) -> None:
+        self._draft["leds"][index]["effect_duration"] = round(scale.get_value())
         self._set_apply_sensitive(True)
 
     def _on_active_dpi_clicked(self, _button, index: int) -> None:
@@ -631,13 +1116,19 @@ class BetterUiApplication(Adw.Application):
                     resolution.resolution = (value,)
                 else:
                     resolution.resolution = (value, value)
-            profile.resolutions[self._draft["active_resolution"]].set_active()
+            if profile.resolutions:
+                profile.resolutions[self._draft["active_resolution"]].set_active()
             if profile.report_rates:
                 profile.report_rate = self._draft["report_rate"]
             if profile.debounces:
                 profile.debounce = self._draft["debounce"]
             if profile.angle_snapping != -1:
                 profile.angle_snapping = self._draft["angle_snapping"]
+            for values, led in zip(self._draft["leds"], profile.leds):
+                led.mode = values["mode"]
+                led.color = values["color"]
+                led.brightness = values["brightness"]
+                led.effect_duration = values["effect_duration"]
             self._selected_device.commit()
         except (GLib.Error, RatbagError, ValueError):
             self._add_toast(_("Could not apply changes"))
