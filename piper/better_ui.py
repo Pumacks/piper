@@ -7,6 +7,7 @@ widgets. GTK 3 and GTK 4 cannot share a process, so the device model is reused
 first while individual configuration pages are ported incrementally.
 """
 
+import re
 from gettext import gettext as _
 from pathlib import Path
 from typing import Optional
@@ -297,6 +298,8 @@ class BetterUiApplication(Adw.Application):
         self._battery_device: Optional[RatbagdDevice] = None
         self._battery_proxy: Optional[Gio.DBusProxy] = None
         self._battery_signal_handler: Optional[int] = None
+        self._battery_retry_source: Optional[int] = None
+        self._battery_retry_count = 0
         self._battery_icon: Optional[Gtk.Image] = None
         self._battery_label: Optional[Gtk.Label] = None
         self._battery_indicator_box: Optional[Gtk.Box] = None
@@ -501,6 +504,9 @@ class BetterUiApplication(Adw.Application):
     def _watch_battery(self, device: Optional[RatbagdDevice]) -> None:
         if device is self._battery_device and self._battery_proxy is not None:
             return
+        if self._battery_retry_source is not None:
+            GLib.Source.remove(self._battery_retry_source)
+            self._battery_retry_source = None
         if self._battery_proxy is not None and self._battery_signal_handler is not None:
             self._battery_proxy.disconnect(self._battery_signal_handler)
         self._battery_device = device
@@ -512,6 +518,28 @@ class BetterUiApplication(Adw.Application):
             self._battery_signal_handler = self._battery_proxy.connect(
                 "g-properties-changed", self._on_battery_properties_changed
             )
+        elif device is not None:
+            self._battery_retry_count = 0
+            self._battery_retry_source = GLib.timeout_add_seconds(
+                2, self._retry_battery, device
+            )
+
+    def _retry_battery(self, device: RatbagdDevice) -> bool:
+        if device is not self._battery_device:
+            self._battery_retry_source = None
+            return False
+        self._battery_retry_count += 1
+        proxy = self._find_upower_battery(device)
+        if proxy is None and self._battery_retry_count < 5:
+            return True
+        self._battery_retry_source = None
+        if proxy is not None:
+            self._battery_proxy = proxy
+            self._battery_signal_handler = proxy.connect(
+                "g-properties-changed", self._on_battery_properties_changed
+            )
+            self._update_battery_indicator()
+        return False
 
     @staticmethod
     def _find_upower_battery(device) -> Optional[Gio.DBusProxy]:
@@ -546,10 +574,8 @@ class BetterUiApplication(Adw.Application):
                 model = BetterUiApplication._proxy_property(proxy, "Model", "")
                 device_type = BetterUiApplication._proxy_property(proxy, "Type", 0)
                 present = BetterUiApplication._proxy_property(proxy, "IsPresent", False)
-                if (
-                    present
-                    and device_type in (5, 12)
-                    and model.casefold() == device.name.casefold()
+                if present and device_type in (5, 6, 12) and (
+                    BetterUiApplication._device_names_match(model, device.name)
                 ):
                     return proxy
         except GLib.Error:
@@ -560,6 +586,29 @@ class BetterUiApplication(Adw.Application):
     def _proxy_property(proxy, name, default):
         value = proxy.get_cached_property(name)
         return default if value is None else value.unpack()
+
+    @staticmethod
+    def _device_names_match(first: str, second: str) -> bool:
+        ignored = {"gaming", "logitech", "mouse", "wireless"}
+
+        def meaningful_words(name):
+            return {
+                word
+                for word in re.findall(r"[a-z0-9]+", name.casefold())
+                if word not in ignored
+            }
+
+        first_words = meaningful_words(first)
+        second_words = meaningful_words(second)
+        return bool(first_words and second_words) and (
+            first_words <= second_words or second_words <= first_words
+        )
+
+    @staticmethod
+    def _battery_icon_name(percentage: int, charging: bool) -> str:
+        level = min(100, max(0, percentage // 10 * 10))
+        suffix = "-charging" if charging else ""
+        return f"battery-level-{level}{suffix}-symbolic"
 
     @staticmethod
     def _battery_snapshot(proxy) -> tuple[str, str, str]:
@@ -580,8 +629,9 @@ class BetterUiApplication(Adw.Application):
                 ),
             )
         )
-        icon = BetterUiApplication._proxy_property(
-            proxy, "IconName", "battery-missing-symbolic"
+        battery_state = BetterUiApplication._proxy_property(proxy, "State", 0)
+        icon = BetterUiApplication._battery_icon_name(
+            percentage, battery_state == 1
         )
         states = {
             1: _("charging"),
@@ -590,9 +640,7 @@ class BetterUiApplication(Adw.Application):
             5: _("waiting to charge"),
             6: _("waiting to discharge"),
         }
-        state = states.get(
-            BetterUiApplication._proxy_property(proxy, "State", 0), _("unknown")
-        )
+        state = states.get(battery_state, _("unknown"))
         return icon, _("{}%").format(percentage), _("Battery: {}% ({})").format(
             percentage, state
         )
