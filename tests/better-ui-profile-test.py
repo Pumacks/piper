@@ -20,6 +20,10 @@ class FakeDevice:
         self.active_profile = active_profile
         self.connected = None
         self.disconnected = None
+        self.commit_count = 0
+
+    def commit(self):
+        self.commit_count += 1
 
     def connect(self, signal, callback):
         self.connected = (signal, callback)
@@ -51,6 +55,13 @@ class FakeApplication:
 
     def _show_device(self, device):
         self.shown_device = device
+
+    @staticmethod
+    def _current_profile(device):
+        return BetterUiApplication._current_profile(device)
+
+    def _add_toast(self, _message):
+        pass
 
 
 class BetterUiProfileTest(unittest.TestCase):
@@ -93,6 +104,17 @@ class BetterUiProfileTest(unittest.TestCase):
         self.assertEqual(second.connected[0], "active-profile-changed")
         self.assertIs(app._profile_signal_device, second)
         self.assertEqual(app._profile_signal_handler, 42)
+
+    def test_successful_profile_switch_commits_device(self):
+        old = FakeProfile()
+        active = FakeProfile(dirty=True)
+        device = FakeDevice([old, active], active)
+        app = FakeApplication(device)
+
+        BetterUiApplication._on_profile_switch_finished(app, device, active, None)
+
+        self.assertEqual(device.commit_count, 1)
+        self.assertIs(app._selected_profile, active)
 
 
 if __name__ == "__main__":

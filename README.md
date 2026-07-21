@@ -210,6 +210,42 @@ rebuild and update the installed application.
 If Piper does not appear in the application menu immediately, log out and back
 in so the desktop session reloads user-local application entries.
 
+## Switch profiles from Steam
+
+The user-local installation includes `~/.local/bin/piper-profile`, a small
+command-line profile switcher designed for game launchers. List the available
+onboard and virtual profile names with:
+
+```sh
+~/.local/bin/piper-profile --list
+```
+
+In a game's **Properties → Launch Options** field in Steam, use:
+
+```sh
+~/.local/bin/piper-profile --profile "Gaming" -- %command%
+```
+
+An onboard profile can also be selected by its one-based slot number. When an
+onboard and virtual profile share a name, the onboard profile is selected by
+default; add `--virtual` to load the virtual one. Virtual profiles replace the
+active onboard slot by default; use `--slot N` to choose another slot explicitly:
+
+```sh
+~/.local/bin/piper-profile --profile "My Game" --virtual --slot 2 -- %command%
+```
+
+When more than one supported mouse connection is present, select one with a
+substring of its name or model:
+
+```sh
+~/.local/bin/piper-profile --device "usb:046d:407f:0" --profile "Gaming" -- %command%
+```
+
+Profile errors are printed to Steam's launch log but do not prevent the game
+from starting. Add `--strict` if the game should only launch after a successful
+profile switch.
+
 ## Development
 
 Run all repository tests:

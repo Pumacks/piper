@@ -24,6 +24,7 @@ from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango, Rsvg  # noqa
 from .ratbagd import (
     Ratbagd,
     RatbagdButton,
+    RatbagdDBusTimeoutError,
     RatbagdDevice,
     RatbagdIncompatibleError,
     RatbagdLed,
@@ -1177,6 +1178,12 @@ class BetterUiApplication(Adw.Application):
             if popover is not None:
                 popover.popdown()
         if profile.is_active:
+            if profile.dirty:
+                try:
+                    device.commit()
+                except (GLib.Error, RatbagdDBusTimeoutError, RatbagError):
+                    self._add_toast(_("Could not apply profile switch"))
+                    return
             self._set_apply_sensitive(any(item.dirty for item in device.profiles))
             self._show_device(device)
             return
@@ -1188,6 +1195,11 @@ class BetterUiApplication(Adw.Application):
         )
 
     def _on_profile_switch_finished(self, device, profile, error) -> None:
+        if error is None:
+            try:
+                device.commit()
+            except (GLib.Error, RatbagdDBusTimeoutError, RatbagError) as commit_error:
+                error = commit_error
         if error is not None:
             self._selected_profile = self._current_profile(device)
             self._add_toast(_("Could not switch profile"))

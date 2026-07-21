@@ -1,0 +1,9 @@
+#!/usr/bin/env python3
+
+import sys
+
+from piper.profile_cli import main
+
+
+if __name__ == "__main__":
+    sys.exit(main(@RATBAGD_API_VERSION@))

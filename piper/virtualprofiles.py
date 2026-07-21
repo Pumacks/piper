@@ -7,7 +7,7 @@ import uuid
 from pathlib import Path
 from typing import List, Optional
 
-from .ratbagd import RatbagdButton, RatbagdMacro, RatbagdProfile
+from .ratbagd import RatbagdButton, RatbagdLed, RatbagdMacro, RatbagdProfile
 
 
 FORMAT_VERSION = 1
@@ -153,13 +153,26 @@ def apply_snapshot(settings: dict, profile: RatbagdProfile) -> None:
         profile.debounce = debounce
 
     for saved, resolution in zip(settings["resolutions"], profile.resolutions):
-        resolution.resolution = tuple(saved["resolution"])
-        if resolution.CAP_DISABLE in resolution.capabilities:
-            resolution.set_disabled(saved["disabled"])
+        updated = tuple(saved["resolution"])
+        if resolution.resolution != updated:
+            resolution.resolution = updated
+
+    # Select the default and active stages before disabling any others. Some
+    # devices reject a transaction that temporarily disables either one.
+    for saved, resolution in zip(settings["resolutions"], profile.resolutions):
         if saved["default"]:
             resolution.set_default()
         if saved["active"]:
             resolution.set_active()
+    for saved, resolution in zip(settings["resolutions"], profile.resolutions):
+        if resolution.CAP_DISABLE in resolution.capabilities:
+            disabled = (
+                saved["disabled"]
+                and not saved["active"]
+                and not saved["default"]
+            )
+            if resolution.is_disabled != disabled:
+                resolution.set_disabled(disabled)
 
     for saved, button in zip(settings["buttons"], profile.buttons):
         action_type = saved["action_type"]
@@ -176,11 +189,20 @@ def apply_snapshot(settings: dict, profile: RatbagdProfile) -> None:
             button.macro = RatbagdMacro.from_ratbag(value)
 
     for saved, led in zip(settings["leds"], profile.leds):
-        if saved["mode"] in led.modes:
-            led.mode = saved["mode"]
-        led.color = tuple(saved["color"])
-        led.brightness = saved["brightness"]
-        led.effect_duration = saved["effect_duration"]
+        mode = saved["mode"]
+        if mode in led.modes and led.mode != mode:
+            led.mode = mode
+        if mode == RatbagdLed.Mode.OFF:
+            continue
+        if led.brightness != saved["brightness"]:
+            led.brightness = saved["brightness"]
+        if mode in (RatbagdLed.Mode.ON, RatbagdLed.Mode.BREATHING):
+            color = tuple(saved["color"])
+            if tuple(led.color) != color:
+                led.color = color
+        if mode in (RatbagdLed.Mode.CYCLE, RatbagdLed.Mode.BREATHING):
+            if led.effect_duration != saved["effect_duration"]:
+                led.effect_duration = saved["effect_duration"]
 
 
 def _validate_layout(settings: dict, profile: RatbagdProfile) -> None:

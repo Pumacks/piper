@@ -112,6 +112,12 @@ configure_file(input: 'piper-better-ui.in',
                install_dir: bindir,
                install_mode: 'rwxr-xr-x')
 
+configure_file(input: 'piper-profile.in',
+               output: 'piper-profile',
+               configuration: config_piper,
+               install_dir: bindir,
+               install_mode: 'rwxr-xr-x')
+
 configure_file(input: 'piper.in',
                output: 'piper.devel',
                configuration: config_piper_devel)
@@ -165,6 +171,11 @@ test(
 test(
   'better-ui-battery',
   find_program('tests/better-ui-battery-test.py'),
+)
+
+test(
+  'profile-cli',
+  find_program('tests/profile-cli-test.py'),
 )
 
 test(
