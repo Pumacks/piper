@@ -153,6 +153,11 @@ test(
 )
 
 test(
+  'better-ui-profiles',
+  find_program('tests/better-ui-profile-test.py'),
+)
+
+test(
   'files-in-git',
   find_program('tests/check-files-in-git.sh'),
   args : [meson.current_source_dir()],

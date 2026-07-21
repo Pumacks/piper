@@ -292,6 +292,8 @@ class BetterUiApplication(Adw.Application):
         self._profile_button: Optional[Gtk.MenuButton] = None
         self._selected_device: Optional[RatbagdDevice] = None
         self._selected_profile: Optional[RatbagdProfile] = None
+        self._profile_signal_device: Optional[RatbagdDevice] = None
+        self._profile_signal_handler: Optional[int] = None
         self._draft = {}
         self._virtual_profiles = VirtualProfileStore(
             Path(GLib.get_user_config_dir()) / "piper" / "virtual_profiles.json"
@@ -309,6 +311,11 @@ class BetterUiApplication(Adw.Application):
         if self._window is None:
             self._window = self._build_window()
             self._connect_ratbagd()
+        elif self._ratbag is not None:
+            # A second launch activates the existing application instance.
+            # Re-read the device state so the profile shown is the one the
+            # mouse is currently using.
+            self._refresh_devices()
         self._window.present()
 
     def _build_window(self) -> Adw.ApplicationWindow:
@@ -359,6 +366,7 @@ class BetterUiApplication(Adw.Application):
 
     def _refresh_devices(self) -> None:
         if self._ratbag is None or not self._ratbag.devices:
+            self._watch_active_profile(None)
             if self._profile_button is not None:
                 self._profile_button.set_visible(False)
             self._content_page.set_child(
@@ -373,8 +381,37 @@ class BetterUiApplication(Adw.Application):
         if device not in self._ratbag.devices:
             device = self._ratbag.devices[0]
         self._selected_device = device
-        self._selected_profile = device.active_profile or device.profiles[0]
+        self._watch_active_profile(device)
+        self._selected_profile = self._current_profile(device)
         self._draft = self._make_draft(self._selected_profile)
+        self._show_device(device)
+
+    @staticmethod
+    def _current_profile(device) -> RatbagdProfile:
+        """Return the profile the device is using, with a safe fallback."""
+        return device.active_profile or device.profiles[0]
+
+    def _watch_active_profile(self, device: Optional[RatbagdDevice]) -> None:
+        if device is self._profile_signal_device:
+            return
+        if (
+            self._profile_signal_device is not None
+            and self._profile_signal_handler is not None
+        ):
+            self._profile_signal_device.disconnect(self._profile_signal_handler)
+        self._profile_signal_device = device
+        self._profile_signal_handler = None
+        if device is not None:
+            self._profile_signal_handler = device.connect(
+                "active-profile-changed", self._on_active_profile_changed
+            )
+
+    def _on_active_profile_changed(self, device, profile) -> None:
+        if device is not self._selected_device:
+            return
+        self._selected_profile = profile
+        self._draft = self._make_draft(profile)
+        self._set_apply_sensitive(any(item.dirty for item in device.profiles))
         self._show_device(device)
 
     def _device_page(self, device: RatbagdDevice) -> Gtk.Paned:
@@ -956,7 +993,7 @@ class BetterUiApplication(Adw.Application):
 
     def _on_profile_switch_finished(self, device, profile, error) -> None:
         if error is not None:
-            self._selected_profile = device.active_profile or device.profiles[0]
+            self._selected_profile = self._current_profile(device)
             self._add_toast(_("Could not switch profile"))
         else:
             self._selected_profile = profile
