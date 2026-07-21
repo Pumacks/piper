@@ -158,6 +158,16 @@ test(
 )
 
 test(
+  'better-ui-settings',
+  find_program('tests/better-ui-settings-test.py'),
+)
+
+test(
+  'better-ui-battery',
+  find_program('tests/better-ui-battery-test.py'),
+)
+
+test(
   'files-in-git',
   find_program('tests/check-files-in-git.sh'),
   args : [meson.current_source_dir()],

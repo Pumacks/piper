@@ -294,6 +294,12 @@ class BetterUiApplication(Adw.Application):
         self._selected_profile: Optional[RatbagdProfile] = None
         self._profile_signal_device: Optional[RatbagdDevice] = None
         self._profile_signal_handler: Optional[int] = None
+        self._battery_device: Optional[RatbagdDevice] = None
+        self._battery_proxy: Optional[Gio.DBusProxy] = None
+        self._battery_signal_handler: Optional[int] = None
+        self._battery_icon: Optional[Gtk.Image] = None
+        self._battery_label: Optional[Gtk.Label] = None
+        self._battery_indicator_box: Optional[Gtk.Box] = None
         self._draft = {}
         self._virtual_profiles = VirtualProfileStore(
             Path(GLib.get_user_config_dir()) / "piper" / "virtual_profiles.json"
@@ -367,6 +373,7 @@ class BetterUiApplication(Adw.Application):
     def _refresh_devices(self) -> None:
         if self._ratbag is None or not self._ratbag.devices:
             self._watch_active_profile(None)
+            self._watch_battery(None)
             if self._profile_button is not None:
                 self._profile_button.set_visible(False)
             self._content_page.set_child(
@@ -423,12 +430,17 @@ class BetterUiApplication(Adw.Application):
         preview_panel.set_margin_bottom(24)
         preview_panel.set_margin_start(24)
         preview_panel.set_margin_end(24)
-        device_name = Gtk.Label(label=device.name, xalign=0)
+        device_heading = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL, spacing=12
+        )
+        device_name = Gtk.Label(label=device.name, xalign=0, hexpand=True)
         device_name.add_css_class("title-2")
+        device_heading.append(device_name)
+        device_heading.append(self._battery_indicator(device))
         device_model = Gtk.Label(label=device.model, xalign=0)
         device_model.add_css_class("dim-label")
         device_model.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
-        preview_panel.append(device_name)
+        preview_panel.append(device_heading)
         preview_panel.append(device_model)
 
         mouse_preview = MousePreview(device)
@@ -467,6 +479,138 @@ class BetterUiApplication(Adw.Application):
         page.set_resize_end_child(True)
         page.set_shrink_end_child(False)
         return page
+
+    def _battery_indicator(self, device: RatbagdDevice) -> Gtk.Box:
+        indicator = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL,
+            spacing=6,
+            valign=Gtk.Align.CENTER,
+        )
+        icon = Gtk.Image.new_from_icon_name("battery-missing-symbolic")
+        label = Gtk.Label(label=_("Unknown"))
+        label.add_css_class("dim-label")
+        indicator.append(icon)
+        indicator.append(label)
+        self._battery_icon = icon
+        self._battery_label = label
+        self._battery_indicator_box = indicator
+        self._watch_battery(device)
+        self._update_battery_indicator()
+        return indicator
+
+    def _watch_battery(self, device: Optional[RatbagdDevice]) -> None:
+        if device is self._battery_device and self._battery_proxy is not None:
+            return
+        if self._battery_proxy is not None and self._battery_signal_handler is not None:
+            self._battery_proxy.disconnect(self._battery_signal_handler)
+        self._battery_device = device
+        self._battery_proxy = (
+            None if device is None else self._find_upower_battery(device)
+        )
+        self._battery_signal_handler = None
+        if self._battery_proxy is not None:
+            self._battery_signal_handler = self._battery_proxy.connect(
+                "g-properties-changed", self._on_battery_properties_changed
+            )
+
+    @staticmethod
+    def _find_upower_battery(device) -> Optional[Gio.DBusProxy]:
+        try:
+            upower = Gio.DBusProxy.new_for_bus_sync(
+                Gio.BusType.SYSTEM,
+                Gio.DBusProxyFlags.DO_NOT_AUTO_START,
+                None,
+                "org.freedesktop.UPower",
+                "/org/freedesktop/UPower",
+                "org.freedesktop.UPower",
+                None,
+            )
+            result = upower.call_sync(
+                "EnumerateDevices",
+                None,
+                Gio.DBusCallFlags.NO_AUTO_START,
+                2000,
+                None,
+            )
+            paths = result.unpack()[0]
+            for path in paths:
+                proxy = Gio.DBusProxy.new_for_bus_sync(
+                    Gio.BusType.SYSTEM,
+                    Gio.DBusProxyFlags.DO_NOT_AUTO_START,
+                    None,
+                    "org.freedesktop.UPower",
+                    path,
+                    "org.freedesktop.UPower.Device",
+                    None,
+                )
+                model = BetterUiApplication._proxy_property(proxy, "Model", "")
+                device_type = BetterUiApplication._proxy_property(proxy, "Type", 0)
+                present = BetterUiApplication._proxy_property(proxy, "IsPresent", False)
+                if (
+                    present
+                    and device_type in (5, 12)
+                    and model.casefold() == device.name.casefold()
+                ):
+                    return proxy
+        except GLib.Error:
+            pass
+        return None
+
+    @staticmethod
+    def _proxy_property(proxy, name, default):
+        value = proxy.get_cached_property(name)
+        return default if value is None else value.unpack()
+
+    @staticmethod
+    def _battery_snapshot(proxy) -> tuple[str, str, str]:
+        if proxy is None:
+            return (
+                "battery-missing-symbolic",
+                _("Unknown"),
+                _("Battery level unavailable"),
+            )
+        percentage = round(
+            max(
+                0.0,
+                min(
+                    100.0,
+                    BetterUiApplication._proxy_property(
+                        proxy, "Percentage", 0.0
+                    ),
+                ),
+            )
+        )
+        icon = BetterUiApplication._proxy_property(
+            proxy, "IconName", "battery-missing-symbolic"
+        )
+        states = {
+            1: _("charging"),
+            2: _("discharging"),
+            4: _("fully charged"),
+            5: _("waiting to charge"),
+            6: _("waiting to discharge"),
+        }
+        state = states.get(
+            BetterUiApplication._proxy_property(proxy, "State", 0), _("unknown")
+        )
+        return icon, _("{}%").format(percentage), _("Battery: {}% ({})").format(
+            percentage, state
+        )
+
+    def _on_battery_properties_changed(self, *_args) -> None:
+        self._update_battery_indicator()
+
+    def _update_battery_indicator(self) -> None:
+        if (
+            self._battery_icon is None
+            or self._battery_label is None
+            or self._battery_indicator_box is None
+        ):
+            return
+        icon, label, tooltip = self._battery_snapshot(self._battery_proxy)
+        self._battery_icon.set_from_icon_name(icon)
+        self._battery_label.set_label(label)
+        self._battery_indicator_box.set_tooltip_text(tooltip)
 
     def _refresh_profile_menu(self, device) -> None:
         assert self._profile_button is not None
@@ -802,9 +946,10 @@ class BetterUiApplication(Adw.Application):
                 and not resolution.is_active
             ):
                 enabled = Gtk.Switch(valign=Gtk.Align.CENTER)
-                enabled.set_active(not resolution.is_disabled)
+                enabled.set_active(not self._draft["resolution_disabled"][index])
+                enabled.set_sensitive(not resolution.is_default)
                 enabled.connect(
-                    "notify::active", self._on_resolution_enabled_changed, resolution
+                    "notify::active", self._on_resolution_enabled_changed, index
                 )
                 dpi_row.add_suffix(enabled)
             group.add(dpi_row)
@@ -943,6 +1088,9 @@ class BetterUiApplication(Adw.Application):
             "name": self._profile_display_name(self._selected_device, profile),
             "resolutions": [
                 resolution.resolution[0] for resolution in profile.resolutions
+            ],
+            "resolution_disabled": [
+                resolution.is_disabled for resolution in profile.resolutions
             ],
             "active_resolution": active_index,
             "report_rate": profile.report_rate,
@@ -1165,12 +1313,8 @@ class BetterUiApplication(Adw.Application):
         self._draft["resolutions"][index] = dpi_values[selected]
         self._set_apply_sensitive(True)
 
-    def _on_resolution_enabled_changed(self, switch, _pspec, resolution) -> None:
-        try:
-            resolution.set_disabled(not switch.get_active())
-        except (GLib.Error, RatbagError, ValueError):
-            self._add_toast(_("Could not change DPI stage availability"))
-            return
+    def _on_resolution_enabled_changed(self, switch, _pspec, index: int) -> None:
+        self._draft["resolution_disabled"][index] = not switch.get_active()
         self._set_apply_sensitive(True)
 
     def _on_button_action_changed(self, dropdown, _pspec, button, actions) -> None:
@@ -1276,9 +1420,53 @@ class BetterUiApplication(Adw.Application):
 
     def _on_active_dpi_clicked(self, _button, index: int) -> None:
         self._draft["active_resolution"] = index
+        self._draft["resolution_disabled"][index] = False
         self._set_apply_sensitive(True)
         assert self._selected_device is not None
         self._show_device(self._selected_device)
+
+    @staticmethod
+    def _apply_resolution_draft(profile, draft) -> None:
+        for value, resolution in zip(draft["resolutions"], profile.resolutions):
+            current = resolution.resolution
+            updated = (value,) if len(current) == 1 else (value, value)
+            if updated != current:
+                resolution.resolution = updated
+
+        if not profile.resolutions:
+            return
+        active_index = draft["active_resolution"]
+        active = profile.resolutions[active_index]
+        if active.is_disabled:
+            active.set_disabled(False)
+        if not active.is_active:
+            active.set_active()
+
+        for index, (disabled, resolution) in enumerate(
+            zip(draft["resolution_disabled"], profile.resolutions)
+        ):
+            # Active and default stages must remain available. In particular,
+            # Logitech HID++ devices reject commits with a disabled default.
+            desired = disabled and index != active_index and not resolution.is_default
+            if desired != resolution.is_disabled:
+                resolution.set_disabled(desired)
+
+    @staticmethod
+    def _apply_led_draft(profile, draft) -> None:
+        for values, led in zip(draft["leds"], profile.leds):
+            mode = values["mode"]
+            if led.mode != mode:
+                led.mode = mode
+            if mode == RatbagdLed.Mode.OFF:
+                continue
+            if led.brightness != values["brightness"]:
+                led.brightness = values["brightness"]
+            if mode in (RatbagdLed.Mode.ON, RatbagdLed.Mode.BREATHING):
+                if tuple(led.color) != values["color"]:
+                    led.color = values["color"]
+            if mode in (RatbagdLed.Mode.CYCLE, RatbagdLed.Mode.BREATHING):
+                if led.effect_duration != values["effect_duration"]:
+                    led.effect_duration = values["effect_duration"]
 
     def _on_report_rate_changed(self, row, _pspec) -> None:
         assert self._selected_profile is not None
@@ -1316,26 +1504,14 @@ class BetterUiApplication(Adw.Application):
                 and name != profile.name
             ):
                 profile.name = name
-            for value, resolution in zip(
-                self._draft["resolutions"], profile.resolutions
-            ):
-                if len(resolution.resolution) == 1:
-                    resolution.resolution = (value,)
-                else:
-                    resolution.resolution = (value, value)
-            if profile.resolutions:
-                profile.resolutions[self._draft["active_resolution"]].set_active()
+            self._apply_resolution_draft(profile, self._draft)
             if profile.report_rates:
                 profile.report_rate = self._draft["report_rate"]
             if profile.debounces:
                 profile.debounce = self._draft["debounce"]
             if profile.angle_snapping != -1:
                 profile.angle_snapping = self._draft["angle_snapping"]
-            for values, led in zip(self._draft["leds"], profile.leds):
-                led.mode = values["mode"]
-                led.color = values["color"]
-                led.brightness = values["brightness"]
-                led.effect_duration = values["effect_duration"]
+            self._apply_led_draft(profile, self._draft)
             self._selected_device.commit()
         except (GLib.Error, OSError, RatbagError, ValueError):
             self._add_toast(_("Could not apply changes"))
