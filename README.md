@@ -13,9 +13,10 @@ to manage, and common changes no longer require jumping between separate
 pages.
 
 > [!IMPORTANT]
-> This branch is actively migrating Piper from GTK3 to GTK4. The modern UI is
-> currently launched with `piper-better-ui.devel`; the regular `piper` launcher
-> remains available as a compatibility interface.
+> This branch is actively migrating Piper from GTK3 to GTK4. The modern UI can
+> be launched from the build tree with `piper-better-ui.devel` or installed for
+> the current user with `install-user.sh`; the regular `piper` launcher remains
+> available as a compatibility interface.
 
 ## Preview
 
@@ -180,21 +181,34 @@ If Meson asks for reconfiguration:
 meson setup --reconfigure builddir --prefix=/usr
 ```
 
-## User-local compatibility installation
+## Install Piper Next for the current user
 
-The included helper rebuilds and installs this fork under `~/.local` without
-requiring `sudo`:
+The included helper builds and installs the modern GTK4 interface under
+`~/.local` without requiring `sudo`:
 
 ```sh
 ./install-user.sh
 ```
 
-Close any running Piper window and reopen Piper from the application menu.
+This installs the application launcher, icon, resources, translations, Python
+modules, and these two executables:
 
-> [!NOTE]
-> During the GTK4 migration, the installed desktop launcher uses the
-> compatibility interface. Use `./builddir/piper-better-ui.devel` for the
-> modern interface documented above.
+- `~/.local/bin/piper-better-ui` — the modern GTK4 interface used by the
+  application-menu entry;
+- `~/.local/bin/piper` — the GTK3 compatibility interface.
+
+Close any running Piper window, then open **Piper** from the application menu.
+The modern interface can also be started directly:
+
+```sh
+~/.local/bin/piper-better-ui
+```
+
+After pulling changes from the repository, run `./install-user.sh` again to
+rebuild and update the installed application.
+
+If Piper does not appear in the application menu immediately, log out and back
+in so the desktop session reloads user-local application entries.
 
 ## Development
 

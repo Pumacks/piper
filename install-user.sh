@@ -25,11 +25,11 @@ fi
 meson install -C "$build_dir"
 
 # Desktop sessions do not universally include ~/.local/bin in PATH. Use the
-# absolute executable path so the launcher cannot accidentally open a distro
-# or Flatpak version of Piper instead.
+# absolute executable path so the launcher opens this fork's modern GTK4 UI
+# instead of a distro or Flatpak version of Piper.
 desktop_file="$install_prefix/share/applications/org.freedesktop.Piper.desktop"
 if [ -f "$desktop_file" ]; then
-    sed -i "s|^Exec=.*|Exec=$install_prefix/bin/piper|" "$desktop_file"
+    sed -i "s|^Exec=.*|Exec=$install_prefix/bin/piper-better-ui|" "$desktop_file"
 fi
 
 if command -v update-desktop-database >/dev/null 2>&1; then
@@ -38,4 +38,4 @@ fi
 
 printf '\nPiper was installed for this user.\n'
 printf 'Close any running Piper window, then open Piper from the application menu.\n'
-printf 'Installed executable: %s/bin/piper\n' "$install_prefix"
+printf 'Installed executable: %s/bin/piper-better-ui\n' "$install_prefix"

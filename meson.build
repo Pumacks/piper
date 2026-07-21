@@ -109,7 +109,8 @@ configure_file(input: 'piper.in',
 configure_file(input: 'piper-better-ui.in',
                output: 'piper-better-ui',
                configuration: config_piper,
-               install: false)
+               install_dir: bindir,
+               install_mode: 'rwxr-xr-x')
 
 configure_file(input: 'piper.in',
                output: 'piper.devel',
